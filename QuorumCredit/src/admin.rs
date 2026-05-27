@@ -634,3 +634,20 @@ fn log_admin_action(env: &Env, admin: &Address, action: &str) {
     });
     env.storage().instance().set(&DataKey::AdminAuditLog, &log);
 }
+
+// #643: Set allowed loan purposes whitelist
+pub fn set_allowed_purposes(env: Env, admin_signers: Vec<Address>, purposes: Vec<soroban_sdk::String>) {
+    require_admin_approval(&env, &admin_signers);
+    let mut cfg = config(&env);
+    cfg.allowed_purposes = purposes;
+    env.storage().instance().set(&DataKey::Config, &cfg);
+}
+
+// #644: Set insurance premium in basis points
+pub fn set_insurance_premium_bps(env: Env, admin_signers: Vec<Address>, bps: i128) {
+    require_admin_approval(&env, &admin_signers);
+    assert!(bps >= 0 && bps <= 10_000, "insurance_premium_bps must be 0-10000");
+    let mut cfg = config(&env);
+    cfg.insurance_premium_bps = bps;
+    env.storage().instance().set(&DataKey::Config, &cfg);
+}

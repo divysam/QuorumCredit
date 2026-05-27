@@ -302,6 +302,24 @@ impl QuorumCreditContract {
         loan::get_loans_by_category(env, category)
     }
 
+    // #643: Set allowed loan purposes
+    pub fn set_allowed_purposes(
+        env: Env,
+        admin_signers: Vec<Address>,
+        purposes: Vec<soroban_sdk::String>,
+    ) {
+        admin::set_allowed_purposes(env, admin_signers, purposes)
+    }
+
+    // #644: Set insurance premium bps
+    pub fn set_insurance_premium_bps(
+        env: Env,
+        admin_signers: Vec<Address>,
+        bps: i128,
+    ) {
+        admin::set_insurance_premium_bps(env, admin_signers, bps)
+    }
+
     // #645: Loan Restructuring
     pub fn restructure_loan(
         env: Env,
