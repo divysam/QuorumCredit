@@ -51,4 +51,8 @@ pub enum ContractError {
     InsuranceClaimAlreadyMade = 44,
     /// Basis points value is invalid (must be 0–10000).
     InvalidBps = 45,
+    /// Caller is not the registered oracle address.
+    OracleUnauthorized = 49,
+    /// Credit score value is out of the valid range (0–1000).
+    InvalidCreditScore = 50,
 }

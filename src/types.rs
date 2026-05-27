@@ -167,6 +167,26 @@ pub enum DataKey {
     LoanExtension(Address),
     /// Issue #598: loan_id → Vec<PaymentRecord> (payment history)
     PaymentHistory(u64),
+    /// Oracle contract address authorised to push credit scores
+    OracleAddress,
+    /// borrower → ExternalCreditScore (score + timestamp from oracle)
+    ExternalCreditScore(Address),
+}
+
+// ── Oracle Credit Score ───────────────────────────────────────────────────────
+
+/// External credit score fetched from an oracle.
+/// Score range: 0–1000 (mirrors common credit bureau scales).
+/// Used as a factor in yield-rate adjustment at loan request time.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalCreditScore {
+    /// Normalised score in the range 0–1000.
+    pub score: u32,
+    /// Ledger timestamp when this score was last written by the oracle.
+    pub updated_at: u64,
+    /// The oracle contract that provided this score.
+    pub oracle: Address,
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
