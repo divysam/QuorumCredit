@@ -170,6 +170,8 @@ pub enum DataKey {
     LargeLoanRequest(Address), // borrower → LargeLoanRequestRecord
     VouchGraph(Address, Address), // (voucher, borrower) → depth u32
     LoanCategoryLoans(LoanCategory), // category → Vec<loan_id>
+    Syndicate(u64),                  // syndicate_id → Vec<u64> loan IDs in this syndicate (#647)
+    SyndicateCounter,                // u64: monotonically increasing syndicate ID counter (#647)
 }
 
 // ── Audit Log ─────────────────────────────────────────────────────────────────
@@ -266,6 +268,8 @@ pub struct LoanRecord {
     pub amount: i128,        // total loan principal in stroops
     pub amount_repaid: i128, // cumulative repayments received so far (principal + yield)
     pub total_yield: i128,   // yield owed to vouchers, locked in at disbursement
+    pub yield_bps: i128,     // effective yield rate (risk-adjusted) at disbursement (#646)
+    pub slash_bps: i128,     // effective slash rate (risk-adjusted) at disbursement (#646)
     pub status: LoanStatus,
     pub created_at: u64,                   // ledger timestamp
     pub disbursement_timestamp: u64,       // ledger timestamp
@@ -274,6 +278,7 @@ pub struct LoanRecord {
     pub loan_purpose: soroban_sdk::String, // borrower-supplied purpose string
     pub loan_category: LoanCategory,       // category of the loan
     pub token_address: Address,            // token used for this loan
+    pub syndicate_id: Option<u64>,         // syndicate pool ID if syndicated (#647)
 }
 
 #[contracttype]
