@@ -2,19 +2,19 @@
 
 mod errors;
 mod helpers;
-mod insurance;
+mod oracle;
 mod types;
 mod vouch;
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, String, Vec};
 
 #[cfg(test)]
-mod insurance_pool_test;
+mod withdrawal_queue_test;
 
 use crate::errors::ContractError;
 use crate::helpers::{config, get_active_loan_record, has_active_loan, require_allowed_token, require_not_paused};
 use crate::types::{
-    Config, DataKey, LoanRecord, LoanStatus, VouchRecord,
+    Config, DataKey, LoanRecord, LoanStatus, QueuedWithdrawal, VouchRecord,
     DEFAULT_LOAN_DURATION, DEFAULT_MAX_LOAN_TO_STAKE_RATIO, DEFAULT_MAX_VOUCHERS,
     DEFAULT_MIN_LOAN_AMOUNT, DEFAULT_MIN_VOUCH_AGE_SECS, DEFAULT_SLASH_BPS, DEFAULT_YIELD_BPS,
 };
@@ -82,6 +82,16 @@ impl QuorumCreditContract {
         vouch::vouch(env, voucher, borrower, stake, token)
     }
 
+    pub fn batch_vouch(
+        env: Env,
+        voucher: Address,
+        borrowers: Vec<Address>,
+        stakes: Vec<i128>,
+        token: Address,
+    ) -> Result<(), ContractError> {
+        vouch::batch_vouch(env, voucher, borrowers, stakes, token)
+    }
+
     // ─────────────────────────────────────────────
     // Stake Management
     // ─────────────────────────────────────────────
@@ -95,11 +105,60 @@ impl QuorumCreditContract {
         vouch::increase_stake(env, voucher, borrower, additional)
     }
 
+    /// Decrease stake. If borrower has an active loan, queues the withdrawal.
+    pub fn decrease_stake(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        vouch::decrease_stake(env, voucher, borrower, amount)
+    }
+
+    /// Fully withdraw a vouch. If borrower has an active loan, queues the withdrawal.
+    pub fn withdraw_vouch(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+    ) -> Result<(), ContractError> {
+        vouch::withdraw_vouch(env, voucher, borrower)
+    }
+
     // ─────────────────────────────────────────────
-    // Loans
+    // Withdrawal Queue
     // ─────────────────────────────────────────────
 
-    /// Request a loan. 0.5% of the loan amount is automatically routed to the insurance pool.
+    /// Queue a withdrawal during an active loan.
+    /// Optionally pay a priority fee (stroops) to be processed before others.
+    /// Queue is processed automatically when the loan is repaid or slashed.
+    pub fn request_withdrawal(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+        priority_fee: i128,
+    ) -> Result<(), ContractError> {
+        vouch::request_withdrawal(env, voucher, borrower, priority_fee)
+    }
+
+    /// Partial withdrawal: withdraw up to 50% of stake during an active loan.
+    /// A 10% penalty is applied to the withdrawn amount and distributed to remaining vouchers.
+    pub fn partial_withdraw(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+    ) -> Result<(), ContractError> {
+        vouch::partial_withdraw(env, voucher, borrower)
+    }
+
+    /// Get the pending withdrawal queue for a borrower.
+    pub fn get_withdrawal_queue(env: Env, borrower: Address) -> Vec<QueuedWithdrawal> {
+        vouch::get_withdrawal_queue(env, borrower)
+    }
+
+    // ─────────────────────────────────────────────
+    // Loans (minimal — for test support)
+    // ─────────────────────────────────────────────
+
     pub fn request_loan(
         env: Env,
         borrower: Address,
@@ -177,90 +236,11 @@ impl QuorumCreditContract {
             .persistent()
             .set(&DataKey::ActiveLoan(borrower.clone()), &loan_id);
 
-        // Auto-collect insurance fee from disbursed amount (held by contract)
-        insurance::collect_loan_fee(&env, amount);
-
         token_client.transfer(&env.current_contract_address(), &borrower, &amount);
 
         env.events().publish(
             (symbol_short!("loan"), symbol_short!("created")),
             (borrower, amount),
-        );
-
-        Ok(())
-    }
-
-    /// Slash a borrower's loan (admin). Routes 20% of slashed funds to insurance pool.
-    pub fn slash(
-        env: Env,
-        admin_signers: Vec<Address>,
-        borrower: Address,
-    ) -> Result<(), ContractError> {
-        require_not_paused(&env)?;
-
-        let cfg = config(&env);
-        let mut approved: u32 = 0;
-        for signer in admin_signers.iter() {
-            if cfg.admins.iter().any(|a| a == signer) {
-                signer.require_auth();
-                approved += 1;
-            }
-        }
-        if approved < cfg.admin_threshold {
-            return Err(ContractError::UnauthorizedCaller);
-        }
-
-        let mut loan = get_active_loan_record(&env, &borrower)?;
-        loan.status = LoanStatus::Defaulted;
-
-        let vouches: Vec<VouchRecord> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Vouches(borrower.clone()))
-            .unwrap_or(Vec::new(&env));
-
-        let token_client = require_allowed_token(&env, &loan.token_address)?;
-        let contract = env.current_contract_address();
-        let mut total_slashed: i128 = 0;
-
-        for v in vouches.iter() {
-            if v.token != loan.token_address {
-                continue;
-            }
-            let slash_amount = v.stake * cfg.slash_bps / 10_000;
-            total_slashed += slash_amount;
-            // Return unslashed portion to voucher
-            let returned = v.stake - slash_amount;
-            if returned > 0 {
-                token_client.transfer(&contract, &v.voucher, &returned);
-            }
-        }
-
-        // Route 20% of total slashed to insurance pool; rest to slash treasury
-        let to_pool = total_slashed * crate::types::SLASH_TO_INSURANCE_BPS as i128 / 10_000;
-        let to_treasury = total_slashed - to_pool;
-
-        insurance::allocate_slash_to_pool(&env, total_slashed);
-
-        let treasury: i128 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::SlashTreasury)
-            .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&DataKey::SlashTreasury, &(treasury + to_treasury));
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::Loan(loan.id), &loan);
-        env.storage()
-            .persistent()
-            .remove(&DataKey::ActiveLoan(borrower.clone()));
-
-        env.events().publish(
-            (symbol_short!("loan"), symbol_short!("slashed")),
-            (borrower, total_slashed),
         );
 
         Ok(())
@@ -285,6 +265,7 @@ impl QuorumCreditContract {
 
         let token_client = require_allowed_token(&env, &loan.token_address)?;
         token_client.transfer(&borrower, &env.current_contract_address(), &payment);
+
         loan.amount_repaid += payment;
 
         if loan.amount_repaid >= total_owed {
@@ -318,6 +299,9 @@ impl QuorumCreditContract {
                     &(v.stake + yield_share),
                 );
             }
+
+            // Process any queued withdrawals now that the loan is closed
+            vouch::process_withdrawal_queue(&env, &borrower);
 
             env.storage()
                 .persistent()
@@ -354,59 +338,12 @@ impl QuorumCreditContract {
             .unwrap_or(Vec::new(&env))
     }
 
-    // ─────────────────────────────────────────────
-    // Insurance Pool
-    // ─────────────────────────────────────────────
-
-    /// Voluntarily contribute tokens to the insurance pool.
-    pub fn contribute_to_insurance(
-        env: Env,
-        contributor: Address,
-        amount: i128,
-    ) -> Result<(), ContractError> {
-        insurance::contribute_to_insurance(env, contributor, amount)
-    }
-
-    /// Claim insurance payout after a borrower default.
-    /// Payout = min(pool, slashed_stake × coverage_bps / 10_000). Capped at 25% by default.
-    pub fn claim_insurance(
-        env: Env,
-        voucher: Address,
-        loan_id: u64,
-    ) -> Result<(), ContractError> {
-        insurance::claim_insurance(env, voucher, loan_id)
-    }
-
-    /// Returns the current insurance pool balance in stroops.
-    pub fn get_insurance_pool_balance(env: Env) -> i128 {
-        insurance::get_insurance_pool_balance(env)
-    }
-
-    /// Set the protocol insurance fee in basis points (admin-only, max 10000).
-    pub fn set_insurance_fee_bps(
-        env: Env,
-        admin_signers: Vec<Address>,
-        fee_bps: u32,
-    ) -> Result<(), ContractError> {
-        insurance::set_insurance_fee_bps(env, admin_signers, fee_bps)
-    }
-
-    /// Set the insurance coverage cap in basis points (admin-only, max 10000).
-    pub fn set_insurance_coverage_bps(
-        env: Env,
-        admin_signers: Vec<Address>,
-        coverage_bps: u32,
-    ) -> Result<(), ContractError> {
-        insurance::set_insurance_coverage_bps(env, admin_signers, coverage_bps)
-    }
-
-    /// Returns the current insurance fee in basis points.
-    pub fn get_insurance_fee_bps(env: Env) -> u32 {
-        insurance::get_insurance_fee_bps_pub(env)
-    }
-
-    /// Returns the current insurance coverage cap in basis points.
-    pub fn get_insurance_coverage_bps(env: Env) -> u32 {
-        insurance::get_insurance_coverage_bps_pub(env)
+    pub fn vouch_exists(env: Env, voucher: Address, borrower: Address) -> bool {
+        let vouches: Vec<VouchRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vouches(borrower))
+            .unwrap_or(Vec::new(&env));
+        vouches.iter().any(|v| v.voucher == voucher)
     }
 }
