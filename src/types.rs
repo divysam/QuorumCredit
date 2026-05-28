@@ -48,6 +48,8 @@ pub const DEFAULT_MAX_LOAN_TO_STAKE_RATIO: u32 = 150;
 pub const DEFAULT_VOUCH_COOLDOWN_SECS: u64 = 24 * 60 * 60; // 24 hours
 /// Default maximum number of vouchers that may back a single borrower.
 pub const DEFAULT_MAX_VOUCHERS_PER_BORROWER: u32 = 50;
+/// Default governance voting period for slash-threshold proposals, in seconds (7 days).
+pub const DEFAULT_VOTING_PERIOD_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// Minimum delay before a timelocked governance action may be executed, in seconds (24 hours).
 pub const TIMELOCK_DELAY: u64 = 24 * 60 * 60;
 /// Maximum window after `eta` within which a timelocked action must be executed, in seconds (72 hours).
@@ -170,6 +172,14 @@ pub enum DataKey {
     AdminAction(u64),        // action_id → AdminActionProposal
     AdminActionCounter,      // u64: monotonically increasing admin action ID
     SlashAppeal(Address, Address), // (borrower, voucher) → SlashAppealRecord
+    /// Slash-threshold governance proposal id → proposal record.
+    SlashThresholdProposal(u64),
+    SlashThresholdProposalCounter,
+    /// Per-borrower timestamp of the last successful slash.
+    LastSlashedAt(Address),
+    /// Admin config-update proposal id → proposal record.
+    ConfigUpdateProposal(u64),
+    ConfigUpdateProposalCounter,
     /// Issue #599/#600: (voucher, borrower) → WithdrawalRequest (pending timelock withdrawal)
     PendingWithdrawal(Address, Address),
     /// Issue #601: borrower → LoanExtensionRequest
@@ -207,6 +217,39 @@ pub struct SlashVoteRecord {
     pub executed: bool,
 }
 
+/// Governance proposal to change the protocol slash threshold (`Config.slash_bps`).
+#[contracttype]
+#[derive(Clone)]
+pub struct SlashThresholdProposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub proposed_threshold: i128,
+    pub proposed_at: u64,
+    pub approve_votes: u32,
+    pub reject_votes: u32,
+    pub voters: Vec<Address>,
+    pub finalized: bool,
+}
+
+/// Config field targeted by an admin config-update proposal.
+#[contracttype]
+#[derive(Clone)]
+pub enum ConfigUpdateKey {
+    AdminThreshold,
+}
+
+/// Multi-sig admin proposal to update a config field.
+#[contracttype]
+#[derive(Clone)]
+pub struct ConfigUpdateProposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub key: ConfigUpdateKey,
+    pub new_value: u32,
+    pub approvals: Vec<Address>,
+    pub executed: bool,
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -241,6 +284,12 @@ pub struct Config {
     pub prepayment_penalty_bps: u32,
     /// #634: Liquidity mining reward rate in basis points per epoch (e.g. 50 = 0.5% per 7 days).
     pub liquidity_mining_rate_bps: u32,
+    /// Voting period for slash-threshold governance proposals, in seconds.
+    pub voting_period_seconds: u64,
+    /// Minimum seconds between slashes for the same borrower (0 = disabled).
+    pub slash_cooldown_seconds: u64,
+    /// When true, critical write paths are blocked until multi-sig emergency unpause.
+    pub emergency_pause_enabled: bool,
 }
 
 // ── Data Types ────────────────────────────────────────────────────────────────

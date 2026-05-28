@@ -1,10 +1,11 @@
 use crate::errors::ContractError;
 use crate::helpers::{
-    add_slash_balance, config, get_active_loan_record, get_latest_loan_record, require_not_paused,
+    add_slash_balance, config, get_active_loan_record, get_latest_loan_record, has_active_loan,
+    require_governance_participant, require_not_paused,
 };
 use crate::types::{
-    DataKey, LoanStatus, SlashVoteRecord, TimelockAction, TimelockProposal, VouchRecord,
-    BPS_DENOMINATOR, SlashAppealRecord,
+    DataKey, LoanStatus, SlashThresholdProposal, SlashVoteRecord, TimelockAction,
+    TimelockProposal, VouchRecord, BPS_DENOMINATOR, SlashAppealRecord,
 };
 use soroban_sdk::{panic_with_error, symbol_short, Address, Env, Vec};
 
@@ -24,6 +25,20 @@ pub fn vote_slash(
 ) -> Result<(), ContractError> {
     voucher.require_auth();
     require_not_paused(&env)?;
+
+    let cfg = config(&env);
+    let now = env.ledger().timestamp();
+    if cfg.slash_cooldown_seconds > 0 {
+        if let Some(last) = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LastSlashedAt(borrower.clone()))
+        {
+            if now.saturating_sub(last) < cfg.slash_cooldown_seconds {
+                return Err(ContractError::SlashCooldownActive);
+            }
+        }
+    }
 
     // If the borrower's latest loan is already repaid, panic with a clear message.
     if let Some(latest) = get_latest_loan_record(&env, &borrower) {
@@ -67,7 +82,16 @@ pub fn vote_slash(
         });
 
     if vote.executed {
-        panic_with_error!(&env, ContractError::SlashAlreadyExecuted);
+        if has_active_loan(&env, &borrower) {
+            vote = SlashVoteRecord {
+                approve_stake: 0,
+                reject_stake: 0,
+                voters: Vec::new(&env),
+                executed: false,
+            };
+        } else {
+            panic_with_error!(&env, ContractError::SlashAlreadyExecuted);
+        }
     }
 
     // Prevent double-voting.
@@ -189,6 +213,19 @@ pub fn execute_slash_vote(env: Env, borrower: Address) -> Result<(), ContractErr
 
 fn execute_slash(env: &Env, borrower: &Address) -> Result<(), ContractError> {
     let cfg = config(env);
+    let now = env.ledger().timestamp();
+
+    if cfg.slash_cooldown_seconds > 0 {
+        if let Some(last) = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LastSlashedAt(borrower.clone()))
+        {
+            if now.saturating_sub(last) < cfg.slash_cooldown_seconds {
+                return Err(ContractError::SlashCooldownActive);
+            }
+        }
+    }
 
     let vouches: Vec<VouchRecord> = env
         .storage()
@@ -255,8 +292,11 @@ fn execute_slash(env: &Env, borrower: &Address) -> Result<(), ContractError> {
             .set(&DataKey::VoucherStats(v.voucher.clone()), &stats);
     }
 
+    env.storage()
+        .persistent()
+        .set(&DataKey::LastSlashedAt(borrower.clone()), &now);
+
     // Store slashed funds in escrow instead of immediately burning
-    let now = env.ledger().timestamp();
     let release_timestamp = now + crate::types::SLASH_ESCROW_PERIOD;
     env.storage()
         .persistent()
@@ -594,4 +634,158 @@ pub fn execute_slash_appeal(
     );
 
     Ok(())
+}
+
+// ── Issue #680: Slash threshold governance voting ─────────────────────────────
+
+pub fn propose_slash_threshold(
+    env: Env,
+    proposer: Address,
+    new_threshold: i128,
+) -> Result<u64, ContractError> {
+    proposer.require_auth();
+    require_not_paused(&env)?;
+    require_governance_participant(&env, &proposer)?;
+
+    if new_threshold <= 0 || new_threshold > 10_000 {
+        return Err(ContractError::InvalidBps);
+    }
+
+    let proposal_id: u64 = env
+        .storage()
+        .instance()
+        .get::<DataKey, u64>(&DataKey::SlashThresholdProposalCounter)
+        .unwrap_or(0u64)
+        .checked_add(1)
+        .expect("proposal id overflow");
+
+    let proposal = SlashThresholdProposal {
+        id: proposal_id,
+        proposer: proposer.clone(),
+        proposed_threshold: new_threshold,
+        proposed_at: env.ledger().timestamp(),
+        approve_votes: 0,
+        reject_votes: 0,
+        voters: Vec::new(&env),
+        finalized: false,
+    };
+
+    env.storage()
+        .instance()
+        .set(&DataKey::SlashThresholdProposal(proposal_id), &proposal);
+    env.storage()
+        .instance()
+        .set(&DataKey::SlashThresholdProposalCounter, &proposal_id);
+
+    env.events().publish(
+        (symbol_short!("gov"), symbol_short!("sth_prop")),
+        (proposal_id, proposer, new_threshold),
+    );
+
+    Ok(proposal_id)
+}
+
+pub fn vote_slash_threshold(
+    env: Env,
+    voter: Address,
+    proposal_id: u64,
+    approve: bool,
+) -> Result<(), ContractError> {
+    voter.require_auth();
+    require_not_paused(&env)?;
+    require_governance_participant(&env, &voter)?;
+
+    let mut proposal: SlashThresholdProposal = env
+        .storage()
+        .instance()
+        .get(&DataKey::SlashThresholdProposal(proposal_id))
+        .ok_or(ContractError::ProposalNotFound)?;
+
+    if proposal.finalized {
+        return Err(ContractError::ProposalAlreadyFinalized);
+    }
+
+    let cfg = config(&env);
+    let now = env.ledger().timestamp();
+    if now >= proposal.proposed_at + cfg.voting_period_seconds {
+        return Err(ContractError::VotingPeriodEnded);
+    }
+
+    if proposal.voters.iter().any(|v| v == voter) {
+        return Err(ContractError::AlreadyVoted);
+    }
+
+    if approve {
+        proposal.approve_votes += 1;
+    } else {
+        proposal.reject_votes += 1;
+    }
+    proposal.voters.push_back(voter.clone());
+
+    env.storage()
+        .instance()
+        .set(&DataKey::SlashThresholdProposal(proposal_id), &proposal);
+
+    env.events().publish(
+        (symbol_short!("gov"), symbol_short!("sth_vote")),
+        (proposal_id, voter, approve),
+    );
+
+    Ok(())
+}
+
+pub fn finalize_slash_threshold(env: Env, proposal_id: u64) -> Result<(), ContractError> {
+    require_not_paused(&env)?;
+
+    let mut proposal: SlashThresholdProposal = env
+        .storage()
+        .instance()
+        .get(&DataKey::SlashThresholdProposal(proposal_id))
+        .ok_or(ContractError::ProposalNotFound)?;
+
+    if proposal.finalized {
+        return Err(ContractError::ProposalAlreadyFinalized);
+    }
+
+    let cfg = config(&env);
+    let now = env.ledger().timestamp();
+    let voting_end = proposal.proposed_at + cfg.voting_period_seconds;
+
+    if now < voting_end {
+        return Err(ContractError::TimelockNotReady);
+    }
+    if now > voting_end + cfg.voting_period_seconds {
+        return Err(ContractError::TimelockExpired);
+    }
+
+    proposal.finalized = true;
+    env.storage()
+        .instance()
+        .set(&DataKey::SlashThresholdProposal(proposal_id), &proposal);
+
+    if proposal.approve_votes > proposal.reject_votes {
+        let mut cfg = config(&env);
+        cfg.slash_bps = proposal.proposed_threshold;
+        env.storage().instance().set(&DataKey::Config, &cfg);
+        env.events().publish(
+            (symbol_short!("gov"), symbol_short!("sth_ok")),
+            (proposal_id, proposal.proposed_threshold),
+        );
+    } else {
+        env.events().publish(
+            (symbol_short!("gov"), symbol_short!("sth_no")),
+            proposal_id,
+        );
+    }
+
+    Ok(())
+}
+
+pub fn get_slash_threshold_proposal(
+    env: Env,
+    proposal_id: u64,
+) -> Option<SlashThresholdProposal> {
+    env.storage()
+        .instance()
+        .get(&DataKey::SlashThresholdProposal(proposal_id))
 }
