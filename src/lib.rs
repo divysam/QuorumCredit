@@ -29,6 +29,8 @@ mod cross_chain_vouch_test;
 mod dynamic_slash_threshold_test;
 #[cfg(test)]
 mod loan_size_slash_test;
+#[cfg(test)]
+mod repayment_confirmation_test;
 
 use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
@@ -80,6 +82,7 @@ impl QuorumCreditContract {
                 dynamic_slash_threshold: DEFAULT_DYNAMIC_SLASH_THRESHOLD,
                 loan_size_slash_enabled: DEFAULT_LOAN_SIZE_SLASH_ENABLED,
                 loan_size_slash_max_bps: DEFAULT_LOAN_SIZE_SLASH_MAX_BPS,
+                confirmation_required: DEFAULT_CONFIRMATION_REQUIRED,
             },
         );
 
@@ -269,6 +272,32 @@ impl QuorumCreditContract {
         Ok(())
     }
 
+    /// Confirm intent to repay the active loan.
+    ///
+    /// When `Config.confirmation_required` is `true`, borrowers must call this
+    /// function before calling `repay`. The confirmation is stored per-loan and
+    /// consumed on the first successful `repay` call, so it cannot be replayed.
+    ///
+    /// This is a no-op (succeeds silently) when `confirmation_required` is false,
+    /// so callers can always call it without checking the config first.
+    pub fn confirm_repayment(env: Env, borrower: Address) -> Result<(), ContractError> {
+        borrower.require_auth();
+        require_not_paused(&env)?;
+
+        let loan = get_active_loan_record(&env, &borrower)?;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RepaymentConfirmation(loan.id), &true);
+
+        env.events().publish(
+            (symbol_short!("loan"), symbol_short!("repay_ok")),
+            (borrower, loan.id),
+        );
+
+        Ok(())
+    }
+
     pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractError> {
         borrower.require_auth();
         require_not_paused(&env)?;
@@ -280,6 +309,25 @@ impl QuorumCreditContract {
         }
 
         let cfg = config(&env);
+
+        // If confirmation_required is enabled, the borrower must have called
+        // confirm_repayment first. The confirmation is keyed by loan_id and
+        // consumed here so it cannot be replayed.
+        if cfg.confirmation_required {
+            let confirmed: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::RepaymentConfirmation(loan.id))
+                .unwrap_or(false);
+            if !confirmed {
+                return Err(ContractError::RepaymentNotConfirmed);
+            }
+            // Consume the confirmation — one-time use.
+            env.storage()
+                .persistent()
+                .remove(&DataKey::RepaymentConfirmation(loan.id));
+        }
+
         let now = env.ledger().timestamp();
 
         // #668: Apply early repayment discount if repaying before deadline
@@ -709,5 +757,16 @@ impl QuorumCreditContract {
 
     pub fn emergency_unpause(env: Env, admin_signers: Vec<Address>) -> Result<(), ContractError> {
         admin::emergency_unpause(env, admin_signers)
+    }
+
+    /// Toggle the borrower repayment confirmation requirement on/off.
+    ///
+    /// When enabled, borrowers must call `confirm_repayment` before `repay`.
+    pub fn set_confirmation_required(
+        env: Env,
+        admin_signers: Vec<Address>,
+        enabled: bool,
+    ) {
+        admin::set_confirmation_required(env, admin_signers, enabled)
     }
 }

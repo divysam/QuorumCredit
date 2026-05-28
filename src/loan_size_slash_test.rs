@@ -27,6 +27,7 @@ mod tests {
             dynamic_slash_threshold: false,
             loan_size_slash_enabled,
             loan_size_slash_max_bps: max_bps,
+            confirmation_required: false,
         }
     }
 

@@ -86,6 +86,8 @@ pub const DEFAULT_LOAN_SIZE_SLASH_ENABLED: bool = false;
 /// this is the ceiling (loans at or above the total staked collateral).
 pub const DEFAULT_LOAN_SIZE_SLASH_MAX_BPS: i128 = 8_000;
 
+/// Default borrower repayment confirmation requirement (false = disabled by default).
+pub const DEFAULT_CONFIRMATION_REQUIRED: bool = false;
 /// Timelock delay for decrease_stake during an active loan, in seconds (7 days).
 pub const DECREASE_STAKE_TIMELOCK: u64 = 7 * 24 * 60 * 60;
 
@@ -261,6 +263,8 @@ pub enum DataKey {
     ExternalCreditScore(Address),
     // #666: Escrowed repayment amount per borrower (held pending oracle verification)
     EscrowAmount(Address),
+    // Borrower repayment confirmation: loan_id → bool (true = confirmed, consumed on repay)
+    RepaymentConfirmation(u64),
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -361,6 +365,9 @@ pub struct Config {
     /// Maximum slash rate applied to the largest loans when loan-size scaling is enabled,
     /// in basis points (e.g. 8000 = 80%). Must be >= slash_bps.
     pub loan_size_slash_max_bps: i128,
+    /// When true, borrowers must call `confirm_repayment` before `repay` will be accepted.
+    /// Protects against accidental or front-run repayments. Default: false.
+    pub confirmation_required: bool,
 }
 
 // ── Data Types ────────────────────────────────────────────────────────────────

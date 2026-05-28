@@ -68,4 +68,6 @@ pub enum ContractError {
     ProposalNotFound = 52,
     /// Governance proposal was already finalized.
     ProposalAlreadyFinalized = 53,
+    /// Borrower must call `confirm_repayment` before `repay` when confirmation_required is enabled.
+    RepaymentNotConfirmed = 54,
 }

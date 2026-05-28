@@ -952,3 +952,23 @@ pub fn emergency_unpause(env: Env, admin_signers: Vec<Address>) -> Result<(), Co
 
     Ok(())
 }
+
+/// Toggle the borrower repayment confirmation requirement on/off.
+/// When enabled, borrowers must call `confirm_repayment` before `repay`.
+/// When disabled (default), `repay` works without any prior confirmation.
+pub fn set_confirmation_required(
+    env: Env,
+    admin_signers: Vec<Address>,
+    enabled: bool,
+) {
+    require_admin_approval(&env, &admin_signers);
+
+    let mut cfg = config(&env);
+    cfg.confirmation_required = enabled;
+
+    env.storage().instance().set(&DataKey::Config, &cfg);
+    env.events().publish(
+        (symbol_short!("admin"), symbol_short!("cnf_req")),
+        (admin_signers.get(0).unwrap(), enabled, env.ledger().timestamp()),
+    );
+}
