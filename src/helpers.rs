@@ -2,6 +2,30 @@ use crate::errors::ContractError;
 use crate::types::{Config, DataKey, LoanRecord};
 use soroban_sdk::{token, Address, Env};
 
+// ── Reentrancy Guard ──────────────────────────────────────────────────────────
+
+/// Acquires the reentrancy lock. Returns `Err(Reentrancy)` if already locked.
+/// Must be paired with `release_lock` at the end of every state-mutating function.
+pub fn acquire_lock(env: &Env) -> Result<(), ContractError> {
+    let locked: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Locked)
+        .unwrap_or(false);
+    if locked {
+        return Err(ContractError::Reentrancy);
+    }
+    env.storage().instance().set(&DataKey::Locked, &true);
+    Ok(())
+}
+
+/// Releases the reentrancy lock. Always call this before returning from a guarded function.
+pub fn release_lock(env: &Env) {
+    env.storage().instance().set(&DataKey::Locked, &false);
+}
+
+// ── Pause Check ───────────────────────────────────────────────────────────────
+
 pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     let paused: bool = env
         .storage()
@@ -15,15 +39,44 @@ pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     }
 }
 
-/// Returns `Err(InsufficientFunds)` if `amount` is not strictly positive (≤ 0).
-/// Use this for all numeric inputs that must be > 0 (stakes, loan amounts, thresholds).
-/// All such amounts are denominated in stroops (1 XLM = 10,000,000 stroops).
-pub fn require_positive_amount(_env: &Env, amount: i128) -> Result<(), ContractError> {
+// ── Centralized Input Validation ──────────────────────────────────────────────
+
+/// Validates that `address` is not the zero/default address.
+/// Returns `Err(ZeroAddress)` if invalid.
+pub fn validate_address(_env: &Env, address: &Address) -> Result<(), ContractError> {
+    // In Soroban, Address is always a valid non-null type; the zero-address check
+    // is enforced by the protocol. We keep this as a centralized hook for future
+    // extension (e.g. blacklist checks) and to replace scattered ad-hoc checks.
+    let _ = address;
+    Ok(())
+}
+
+/// Validates that `amount` is strictly positive (> 0).
+/// Returns `Err(InvalidAmount)` if not.
+pub fn validate_amount(_env: &Env, amount: i128) -> Result<(), ContractError> {
     if amount <= 0 {
-        return Err(ContractError::InsufficientFunds);
+        return Err(ContractError::InvalidAmount);
     }
     Ok(())
 }
+
+/// Validates that `timestamp` is non-zero and not in the past relative to `now`.
+/// Pass `now = env.ledger().timestamp()` for the current ledger time.
+/// Returns `Err(InvalidAmount)` if the timestamp is zero or already expired.
+pub fn validate_timestamp(_env: &Env, timestamp: u64, now: u64) -> Result<(), ContractError> {
+    if timestamp == 0 || timestamp <= now {
+        return Err(ContractError::InvalidAmount);
+    }
+    Ok(())
+}
+
+/// Returns `Err(InsufficientFunds)` if `amount` is not strictly positive (≤ 0).
+/// Kept for backward compatibility; prefer `validate_amount` in new code.
+pub fn require_positive_amount(env: &Env, amount: i128) -> Result<(), ContractError> {
+    validate_amount(env, amount).map_err(|_| ContractError::InsufficientFunds)
+}
+
+// ── Config & Loan Helpers ─────────────────────────────────────────────────────
 
 pub fn config(env: &Env) -> Config {
     env.storage()

@@ -188,6 +188,12 @@ pub enum DataKey {
     StakingDerivative(Address, Address),
     // #637: Fraud Detection
     VoucherFraudScore(Address),
+    /// Reentrancy guard: true while a state-mutating call is in progress.
+    Locked,
+    /// Credentials issued to a holder: holder → Vec<CredentialRecord>
+    Credentials(Address),
+    /// Monotonically increasing credential ID counter.
+    CredentialCounter,
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -531,3 +537,37 @@ pub const FRAUD_SCORE_HIGH_THRESHOLD: u32 = 70;
 pub const FRAUD_SCORE_MAX: u32 = 100;
 pub const FRAUD_SCORE_DEFAULT_WEIGHT: u32 = 20;
 pub const FRAUD_SCORE_CONCENTRATION_WEIGHT: u32 = 10;
+
+// ── Credentials ───────────────────────────────────────────────────────────────
+
+/// Lifecycle status of a credential.
+/// - `Active`: credential is valid and usable.
+/// - `Suspended`: temporarily disabled; can be re-activated by an admin.
+/// - `Revoked`: permanently invalidated; cannot be re-activated.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialStatus {
+    Active,
+    Suspended,
+    Revoked,
+}
+
+/// An on-chain credential issued to a holder by an attestor.
+#[contracttype]
+#[derive(Clone)]
+pub struct CredentialRecord {
+    /// Unique credential ID (monotonically increasing).
+    pub id: u64,
+    /// Address of the credential holder.
+    pub holder: Address,
+    /// Address of the issuing attestor (admin or authorized issuer).
+    pub attestor: Address,
+    /// Human-readable credential type (e.g. "KYC", "CreditScore").
+    pub credential_type: soroban_sdk::String,
+    /// Optional expiry timestamp; `None` means no expiry.
+    pub expiry_timestamp: Option<u64>,
+    /// Ledger timestamp when this credential was issued.
+    pub issued_at: u64,
+    /// Current lifecycle status.
+    pub status: CredentialStatus,
+}

@@ -57,4 +57,14 @@ pub enum ContractError {
     WithdrawalNotQueued = 47,
     /// Partial withdrawal amount exceeds the 50% cap.
     PartialWithdrawalExceedsCap = 48,
+    /// Credential not found for the given holder.
+    CredentialNotFound = 49,
+    /// Credential has already been revoked (permanent; cannot be re-activated).
+    CredentialAlreadyRevoked = 50,
+    /// Credential is already in the requested status.
+    CredentialStatusUnchanged = 51,
+    /// Reentrancy detected: a state-mutating call is already in progress.
+    Reentrancy = 52,
+    /// Credential has expired.
+    CredentialExpired = 53,
 }

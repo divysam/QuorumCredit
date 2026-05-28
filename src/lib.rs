@@ -10,18 +10,23 @@ mod types;
 mod vouch;
 mod vouch_snapshot;
 
-use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, String, Vec};
 
 #[cfg(test)]
 mod withdrawal_queue_test;
+#[cfg(test)]
+mod credential_test;
 
 use crate::errors::ContractError;
-use crate::helpers::{config, get_active_loan_record, has_active_loan, require_allowed_token, require_not_paused};
+use crate::helpers::{
+    acquire_lock, config, get_active_loan_record, has_active_loan, release_lock,
+    require_allowed_token, require_not_paused, validate_address, validate_amount,
+};
 use crate::types::{
-    Config, DataKey, LoanRecord, LoanStatus, QueuedWithdrawal, VouchRecord,
-    DEFAULT_LIQUIDITY_MINING_RATE_BPS, DEFAULT_LOAN_DURATION, DEFAULT_MAX_LOAN_TO_STAKE_RATIO,
-    DEFAULT_MAX_VOUCHERS, DEFAULT_MIN_LOAN_AMOUNT, DEFAULT_MIN_VOUCH_AGE_SECS, DEFAULT_SLASH_BPS,
-    DEFAULT_YIELD_BPS,
+    Config, CredentialRecord, CredentialStatus, DataKey, LoanRecord, LoanStatus, QueuedWithdrawal,
+    VouchRecord, DEFAULT_LIQUIDITY_MINING_RATE_BPS, DEFAULT_LOAN_DURATION,
+    DEFAULT_MAX_LOAN_TO_STAKE_RATIO, DEFAULT_MAX_VOUCHERS, DEFAULT_MIN_LOAN_AMOUNT,
+    DEFAULT_MIN_VOUCH_AGE_SECS, DEFAULT_SLASH_BPS, DEFAULT_YIELD_BPS,
 };
 
 #[contract]
@@ -85,7 +90,10 @@ impl QuorumCreditContract {
         stake: i128,
         token: Address,
     ) -> Result<(), ContractError> {
-        vouch::vouch(env, voucher, borrower, stake, token)
+        acquire_lock(&env)?;
+        let result = vouch::vouch(env.clone(), voucher, borrower, stake, token);
+        release_lock(&env);
+        result
     }
 
     pub fn batch_vouch(
@@ -95,7 +103,10 @@ impl QuorumCreditContract {
         stakes: Vec<i128>,
         token: Address,
     ) -> Result<(), ContractError> {
-        vouch::batch_vouch(env, voucher, borrowers, stakes, token)
+        acquire_lock(&env)?;
+        let result = vouch::batch_vouch(env.clone(), voucher, borrowers, stakes, token);
+        release_lock(&env);
+        result
     }
 
     // ─────────────────────────────────────────────
@@ -108,7 +119,10 @@ impl QuorumCreditContract {
         borrower: Address,
         additional: i128,
     ) -> Result<(), ContractError> {
-        vouch::increase_stake(env, voucher, borrower, additional)
+        acquire_lock(&env)?;
+        let result = vouch::increase_stake(env.clone(), voucher, borrower, additional);
+        release_lock(&env);
+        result
     }
 
     /// Decrease stake. If borrower has an active loan, queues the withdrawal.
@@ -118,7 +132,10 @@ impl QuorumCreditContract {
         borrower: Address,
         amount: i128,
     ) -> Result<(), ContractError> {
-        vouch::decrease_stake(env, voucher, borrower, amount)
+        acquire_lock(&env)?;
+        let result = vouch::decrease_stake(env.clone(), voucher, borrower, amount);
+        release_lock(&env);
+        result
     }
 
     /// Fully withdraw a vouch. If borrower has an active loan, queues the withdrawal.
@@ -127,7 +144,10 @@ impl QuorumCreditContract {
         voucher: Address,
         borrower: Address,
     ) -> Result<(), ContractError> {
-        vouch::withdraw_vouch(env, voucher, borrower)
+        acquire_lock(&env)?;
+        let result = vouch::withdraw_vouch(env.clone(), voucher, borrower);
+        release_lock(&env);
+        result
     }
 
     // ─────────────────────────────────────────────
@@ -143,7 +163,10 @@ impl QuorumCreditContract {
         borrower: Address,
         priority_fee: i128,
     ) -> Result<(), ContractError> {
-        vouch::request_withdrawal(env, voucher, borrower, priority_fee)
+        acquire_lock(&env)?;
+        let result = vouch::request_withdrawal(env.clone(), voucher, borrower, priority_fee);
+        release_lock(&env);
+        result
     }
 
     /// Partial withdrawal: withdraw up to 50% of stake during an active loan.
@@ -153,7 +176,10 @@ impl QuorumCreditContract {
         voucher: Address,
         borrower: Address,
     ) -> Result<(), ContractError> {
-        vouch::partial_withdraw(env, voucher, borrower)
+        acquire_lock(&env)?;
+        let result = vouch::partial_withdraw(env.clone(), voucher, borrower);
+        release_lock(&env);
+        result
     }
 
     /// Get the pending withdrawal queue for a borrower.
@@ -175,8 +201,10 @@ impl QuorumCreditContract {
     ) -> Result<(), ContractError> {
         borrower.require_auth();
         require_not_paused(&env)?;
+        acquire_lock(&env)?;
 
         if has_active_loan(&env, &borrower) {
+            release_lock(&env);
             return Err(ContractError::ActiveLoanExists);
         }
 
@@ -184,7 +212,13 @@ impl QuorumCreditContract {
         let cfg = config(&env);
 
         if amount < cfg.min_loan_amount {
+            release_lock(&env);
             return Err(ContractError::LoanBelowMinAmount);
+        }
+
+        if amount <= 0 {
+            release_lock(&env);
+            return Err(ContractError::InvalidAmount);
         }
 
         let vouches: Vec<VouchRecord> = env
@@ -200,6 +234,7 @@ impl QuorumCreditContract {
             .sum();
 
         if total_stake < threshold {
+            release_lock(&env);
             return Err(ContractError::InsufficientFunds);
         }
 
@@ -249,23 +284,30 @@ impl QuorumCreditContract {
             (borrower, amount),
         );
 
+        release_lock(&env);
         Ok(())
     }
 
     pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractError> {
         borrower.require_auth();
         require_not_paused(&env)?;
+        acquire_lock(&env)?;
 
-        let mut loan = get_active_loan_record(&env, &borrower)?;
+        let mut loan = match get_active_loan_record(&env, &borrower) {
+            Ok(l) => l,
+            Err(e) => { release_lock(&env); return Err(e); }
+        };
 
-        if payment <= 0 {
-            return Err(ContractError::InvalidAmount);
+        if let Err(e) = validate_amount(&env, payment) {
+            release_lock(&env);
+            return Err(e);
         }
 
         let total_owed = loan.amount + loan.total_yield;
         let outstanding = total_owed - loan.amount_repaid;
 
         if payment > outstanding {
+            release_lock(&env);
             return Err(ContractError::InvalidAmount);
         }
 
@@ -326,6 +368,7 @@ impl QuorumCreditContract {
             .persistent()
             .set(&DataKey::Loan(loan.id), &loan);
 
+        release_lock(&env);
         Ok(())
     }
 
@@ -351,5 +394,325 @@ impl QuorumCreditContract {
             .get(&DataKey::Vouches(borrower))
             .unwrap_or(Vec::new(&env));
         vouches.iter().any(|v| v.voucher == voucher)
+    }
+
+    // ─────────────────────────────────────────────
+    // Credentials
+    // ─────────────────────────────────────────────
+
+    /// Issue a credential to a holder. Only callable by an admin.
+    ///
+    /// # Arguments
+    /// * `issuer` - Admin address issuing the credential (must sign)
+    /// * `holder` - Address receiving the credential
+    /// * `credential_type` - Human-readable type string (e.g. "KYC")
+    /// * `expiry_timestamp` - Optional expiry; `None` means no expiry
+    ///
+    /// # Errors
+    /// * `InvalidAmount` if `credential_type` is empty
+    /// * `ZeroAddress` if `holder` is invalid
+    /// * `Reentrancy` if called re-entrantly
+    pub fn issue_credential(
+        env: Env,
+        issuer: Address,
+        holder: Address,
+        credential_type: String,
+        expiry_timestamp: Option<u64>,
+    ) -> Result<u64, ContractError> {
+        issuer.require_auth();
+        acquire_lock(&env)?;
+
+        // Validate inputs
+        validate_address(&env, &holder)?;
+        if credential_type.len() == 0 {
+            release_lock(&env);
+            return Err(ContractError::InvalidAmount);
+        }
+
+        // Verify issuer is an admin
+        let cfg = config(&env);
+        if !cfg.admins.iter().any(|a| a == issuer) {
+            release_lock(&env);
+            return Err(ContractError::UnauthorizedCaller);
+        }
+
+        let now = env.ledger().timestamp();
+        let id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CredentialCounter)
+            .unwrap_or(0u64)
+            + 1;
+        env.storage()
+            .persistent()
+            .set(&DataKey::CredentialCounter, &id);
+
+        let record = CredentialRecord {
+            id,
+            holder: holder.clone(),
+            attestor: issuer,
+            credential_type,
+            expiry_timestamp,
+            issued_at: now,
+            status: CredentialStatus::Active,
+        };
+
+        let mut creds: Vec<CredentialRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Credentials(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+        creds.push_back(record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Credentials(holder.clone()), &creds);
+
+        env.events().publish(
+            (symbol_short!("cred"), symbol_short!("issued")),
+            (holder, id),
+        );
+
+        release_lock(&env);
+        Ok(id)
+    }
+
+    /// Permanently revoke a credential. Revocation is irreversible.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address (must sign)
+    /// * `holder` - Credential holder address
+    /// * `credential_id` - ID of the credential to revoke
+    ///
+    /// # Errors
+    /// * `CredentialNotFound` if no matching credential exists
+    /// * `CredentialAlreadyRevoked` if already revoked
+    /// * `UnauthorizedCaller` if caller is not an admin
+    pub fn revoke_credential(
+        env: Env,
+        admin: Address,
+        holder: Address,
+        credential_id: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        acquire_lock(&env)?;
+
+        let cfg = config(&env);
+        if !cfg.admins.iter().any(|a| a == admin) {
+            release_lock(&env);
+            return Err(ContractError::UnauthorizedCaller);
+        }
+
+        let creds: Vec<CredentialRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Credentials(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        let mut found = false;
+        let mut updated = Vec::new(&env);
+        for mut c in creds.iter() {
+            if c.id == credential_id {
+                found = true;
+                if c.status == CredentialStatus::Revoked {
+                    release_lock(&env);
+                    return Err(ContractError::CredentialAlreadyRevoked);
+                }
+                c.status = CredentialStatus::Revoked;
+            }
+            updated.push_back(c);
+        }
+
+        if !found {
+            release_lock(&env);
+            return Err(ContractError::CredentialNotFound);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Credentials(holder.clone()), &updated);
+
+        env.events().publish(
+            (symbol_short!("cred"), symbol_short!("revoked")),
+            (holder, credential_id),
+        );
+
+        release_lock(&env);
+        Ok(())
+    }
+
+    /// Suspend a credential (temporary; can be re-activated).
+    /// A revoked credential cannot be suspended.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address (must sign)
+    /// * `holder` - Credential holder address
+    /// * `credential_id` - ID of the credential to suspend
+    ///
+    /// # Errors
+    /// * `CredentialNotFound` if no matching credential exists
+    /// * `CredentialAlreadyRevoked` if already permanently revoked
+    /// * `CredentialStatusUnchanged` if already suspended
+    /// * `UnauthorizedCaller` if caller is not an admin
+    pub fn suspend_credential(
+        env: Env,
+        admin: Address,
+        holder: Address,
+        credential_id: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        acquire_lock(&env)?;
+
+        let cfg = config(&env);
+        if !cfg.admins.iter().any(|a| a == admin) {
+            release_lock(&env);
+            return Err(ContractError::UnauthorizedCaller);
+        }
+
+        let creds: Vec<CredentialRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Credentials(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        let mut found = false;
+        let mut updated = Vec::new(&env);
+        for mut c in creds.iter() {
+            if c.id == credential_id {
+                found = true;
+                match c.status {
+                    CredentialStatus::Revoked => {
+                        release_lock(&env);
+                        return Err(ContractError::CredentialAlreadyRevoked);
+                    }
+                    CredentialStatus::Suspended => {
+                        release_lock(&env);
+                        return Err(ContractError::CredentialStatusUnchanged);
+                    }
+                    CredentialStatus::Active => {
+                        c.status = CredentialStatus::Suspended;
+                    }
+                }
+            }
+            updated.push_back(c);
+        }
+
+        if !found {
+            release_lock(&env);
+            return Err(ContractError::CredentialNotFound);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Credentials(holder.clone()), &updated);
+
+        env.events().publish(
+            (symbol_short!("cred"), symbol_short!("suspend")),
+            (holder, credential_id),
+        );
+
+        release_lock(&env);
+        Ok(())
+    }
+
+    /// Re-activate a suspended credential.
+    ///
+    /// # Arguments
+    /// * `admin` - Admin address (must sign)
+    /// * `holder` - Credential holder address
+    /// * `credential_id` - ID of the credential to activate
+    ///
+    /// # Errors
+    /// * `CredentialNotFound` if no matching credential exists
+    /// * `CredentialAlreadyRevoked` if permanently revoked
+    /// * `CredentialStatusUnchanged` if already active
+    /// * `UnauthorizedCaller` if caller is not an admin
+    pub fn activate_credential(
+        env: Env,
+        admin: Address,
+        holder: Address,
+        credential_id: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        acquire_lock(&env)?;
+
+        let cfg = config(&env);
+        if !cfg.admins.iter().any(|a| a == admin) {
+            release_lock(&env);
+            return Err(ContractError::UnauthorizedCaller);
+        }
+
+        let creds: Vec<CredentialRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Credentials(holder.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        let mut found = false;
+        let mut updated = Vec::new(&env);
+        for mut c in creds.iter() {
+            if c.id == credential_id {
+                found = true;
+                match c.status {
+                    CredentialStatus::Revoked => {
+                        release_lock(&env);
+                        return Err(ContractError::CredentialAlreadyRevoked);
+                    }
+                    CredentialStatus::Active => {
+                        release_lock(&env);
+                        return Err(ContractError::CredentialStatusUnchanged);
+                    }
+                    CredentialStatus::Suspended => {
+                        c.status = CredentialStatus::Active;
+                    }
+                }
+            }
+            updated.push_back(c);
+        }
+
+        if !found {
+            release_lock(&env);
+            return Err(ContractError::CredentialNotFound);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Credentials(holder.clone()), &updated);
+
+        release_lock(&env);
+        Ok(())
+    }
+
+    /// Get all credentials for a holder (for the credential viewer).
+    /// Returns all credentials regardless of status so the holder can see
+    /// verification status, expiry, and attestors.
+    pub fn get_credentials(env: Env, holder: Address) -> Vec<CredentialRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Credentials(holder))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Export credentials as a structured list (JSON-serializable via SDK).
+    /// Filters to only Active credentials that have not expired.
+    /// This is the "export credentials" function for the credential viewer.
+    pub fn export_credentials(env: Env, holder: Address) -> Vec<CredentialRecord> {
+        let now = env.ledger().timestamp();
+        let creds: Vec<CredentialRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Credentials(holder))
+            .unwrap_or(Vec::new(&env));
+
+        let mut result = Vec::new(&env);
+        for c in creds.iter() {
+            let expired = c
+                .expiry_timestamp
+                .map(|exp| exp <= now)
+                .unwrap_or(false);
+            if c.status == CredentialStatus::Active && !expired {
+                result.push_back(c);
+            }
+        }
+        result
     }
 }
