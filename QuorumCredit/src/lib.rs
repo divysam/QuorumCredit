@@ -35,8 +35,6 @@ mod bug_condition_test;
 #[cfg(test)]
 mod borrower_whitelist_test;
 #[cfg(test)]
-mod bug_condition_test;
-#[cfg(test)]
 mod config_bps_test;
 #[cfg(test)]
 mod double_repay_test;
@@ -98,6 +96,10 @@ mod initialize_admin_threshold_test;
 mod invariants_test;
 #[cfg(test)]
 mod regression_tests;
+#[cfg(test)]
+mod syndication_test;
+#[cfg(test)]
+mod default_prediction_test;
 
 pub use errors::ContractError;
 pub use types::*;
@@ -246,8 +248,9 @@ impl QuorumCreditContract {
         threshold: i128,
         loan_purpose: soroban_sdk::String,
         token: Address,
+        syndicate_id: Option<u64>,
     ) -> Result<(), ContractError> {
-        loan::request_loan(env, borrower, amount, threshold, loan_purpose, token)
+        loan::request_loan(env, borrower, amount, threshold, loan_purpose, token, syndicate_id)
     }
 
     pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractError> {
@@ -287,6 +290,31 @@ impl QuorumCreditContract {
     // Task 4: Loan Category Analytics
     pub fn get_loans_by_category(env: Env, category: LoanCategory) -> Vec<u64> {
         loan::get_loans_by_category(env, category)
+    }
+
+    /// #647: Get all loan IDs in a syndicate.
+    pub fn get_syndicate_loans(env: Env, syndicate_id: u64) -> Vec<u64> {
+        loan::get_syndicate_loans(env, syndicate_id)
+    }
+
+    /// #647: Create a new syndicate pool and return its ID.
+    pub fn create_syndicate(env: Env) -> u64 {
+        loan::create_syndicate(env)
+    }
+
+    /// #646: Get the risk score for a borrower (0..10_000).
+    pub fn get_risk_score(env: Env, borrower: Address) -> i128 {
+        loan::get_risk_score(env, borrower)
+    }
+
+    /// #646: Preview the dynamic yield rate (bps) for a borrower based on their history.
+    pub fn get_dynamic_yield_bps(env: Env, borrower: Address) -> i128 {
+        loan::get_dynamic_yield_bps(env, borrower)
+    }
+
+    /// #646: Preview the dynamic slash rate (bps) for a borrower based on their history.
+    pub fn get_dynamic_slash_bps(env: Env, borrower: Address) -> i128 {
+        loan::get_dynamic_slash_bps(env, borrower)
     }
 
     // ── Admin Functions (require admin_threshold signatures) ──────────────────

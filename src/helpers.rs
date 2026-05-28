@@ -1,6 +1,6 @@
 use crate::errors::ContractError;
-use crate::types::{Config, DataKey, LoanRecord};
-use soroban_sdk::{token, Address, Env};
+use crate::types::{Config, DataKey, LoanRecord, LoanStatus};
+use soroban_sdk::{token, Address, Env, String, Vec};
 
 pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     let paused: bool = env
@@ -9,15 +9,15 @@ pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
         .get(&DataKey::Paused)
         .unwrap_or(false);
     if paused {
-        Err(ContractError::ContractPaused)
-    } else {
-        Ok(())
+        return Err(ContractError::ContractPaused);
     }
+    let cfg = config(env);
+    if cfg.emergency_pause_enabled {
+        return Err(ContractError::ContractPaused);
+    }
+    Ok(())
 }
 
-/// Returns `Err(InsufficientFunds)` if `amount` is not strictly positive (≤ 0).
-/// Use this for all numeric inputs that must be > 0 (stakes, loan amounts, thresholds).
-/// All such amounts are denominated in stroops (1 XLM = 10,000,000 stroops).
 pub fn require_positive_amount(_env: &Env, amount: i128) -> Result<(), ContractError> {
     if amount <= 0 {
         return Err(ContractError::InsufficientFunds);
@@ -32,8 +32,15 @@ pub fn config(env: &Env) -> Config {
         .expect("not initialized")
 }
 
+pub fn get_admins(env: &Env) -> Vec<Address> {
+    config(env).admins
+}
+
 pub fn has_active_loan(env: &Env, borrower: &Address) -> bool {
-    matches!(get_active_loan_record(env, borrower), Ok(loan) if loan.status == crate::types::LoanStatus::Active)
+    matches!(
+        get_active_loan_record(env, borrower),
+        Ok(loan) if loan.status == LoanStatus::Active
+    )
 }
 
 pub fn get_active_loan_record(env: &Env, borrower: &Address) -> Result<LoanRecord, ContractError> {
@@ -48,8 +55,135 @@ pub fn get_active_loan_record(env: &Env, borrower: &Address) -> Result<LoanRecor
         .ok_or(ContractError::NoActiveLoan)
 }
 
-/// Returns a token client for `addr` after verifying it is an allowed token
-/// (either the primary protocol token or in `Config.allowed_tokens`).
+pub fn get_latest_loan_record(env: &Env, borrower: &Address) -> Option<LoanRecord> {
+    if let Some(loan_id) = env
+        .storage()
+        .persistent()
+        .get(&DataKey::LatestLoan(borrower.clone()))
+    {
+        env.storage().persistent().get(&DataKey::Loan(loan_id))
+    } else {
+        None
+    }
+}
+
+pub fn next_loan_id(env: &Env) -> u64 {
+    let loan_id = env
+        .storage()
+        .persistent()
+        .get(&DataKey::LoanCounter)
+        .unwrap_or(0u64)
+        .checked_add(1)
+        .expect("loan ID overflow");
+    env.storage()
+        .persistent()
+        .set(&DataKey::LoanCounter, &loan_id);
+    loan_id
+}
+
+pub fn add_slash_balance(env: &Env, amount: i128) {
+    let current: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::SlashTreasury)
+        .unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&DataKey::SlashTreasury, &(current + amount));
+}
+
+pub fn is_zero_address(env: &Env, addr: &Address) -> bool {
+    let zero_account = Address::from_string(&String::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    ));
+    let zero_contract = Address::from_string(&String::from_str(
+        env,
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+    ));
+    addr == &zero_account || addr == &zero_contract
+}
+
+pub fn require_valid_address(env: &Env, addr: &Address) -> Result<(), ContractError> {
+    if is_zero_address(env, addr) {
+        Err(ContractError::ZeroAddress)
+    } else {
+        Ok(())
+    }
+}
+
+pub fn require_valid_token(env: &Env, addr: &Address) -> Result<(), ContractError> {
+    require_valid_address(env, addr)?;
+    let client = token::Client::new(env, addr);
+    let probe = env.current_contract_address();
+    if client.try_balance(&probe).is_err() {
+        return Err(ContractError::InvalidToken);
+    }
+    Ok(())
+}
+
+pub fn validate_admin_config(
+    env: &Env,
+    admins: &Vec<Address>,
+    admin_threshold: u32,
+) -> Result<(), ContractError> {
+    if admins.is_empty() {
+        return Err(ContractError::InvalidAdminThreshold);
+    }
+    if admin_threshold == 0 || admin_threshold > admins.len() {
+        return Err(ContractError::InvalidAdminThreshold);
+    }
+    let admin_count = admins.len();
+    for i in 0..admin_count {
+        let admin = admins.get(i).unwrap();
+        require_valid_address(env, &admin)?;
+        for j in 0..i {
+            let prior_admin = admins.get(j).unwrap();
+            if admin == prior_admin {
+                return Err(ContractError::InvalidAdminThreshold);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn require_admin_approval(env: &Env, admin_signers: &Vec<Address>) {
+    let cfg = config(env);
+    assert!(
+        admin_signers.len() >= cfg.admin_threshold,
+        "insufficient admin approvals"
+    );
+    for signer in admin_signers.iter() {
+        assert!(
+            cfg.admins.iter().any(|a| a == signer),
+            "signer is not a registered admin"
+        );
+        signer.require_auth();
+    }
+}
+
+pub fn is_admin(env: &Env, addr: &Address) -> bool {
+    config(env).admins.iter().any(|a| a == *addr)
+}
+
+/// Governance participant: registered admin or holder of the protocol token.
+pub fn is_governance_participant(env: &Env, addr: &Address) -> bool {
+    if is_admin(env, addr) {
+        return true;
+    }
+    let cfg = config(env);
+    let token = token::Client::new(env, &cfg.token);
+    token.balance(addr) > 0
+}
+
+pub fn require_governance_participant(env: &Env, addr: &Address) -> Result<(), ContractError> {
+    if is_governance_participant(env, addr) {
+        Ok(())
+    } else {
+        Err(ContractError::NotGovernanceParticipant)
+    }
+}
+
 pub fn require_allowed_token<'a>(
     env: &'a Env,
     addr: &Address,
@@ -62,99 +196,12 @@ pub fn require_allowed_token<'a>(
     }
 }
 
-/// Calculate dynamic slash threshold based on protocol health.
-/// Returns the effective slash_bps to use for slashing operations.
-/// 
-/// When dynamic_slash_threshold is enabled:
-/// - Healthy protocol (≥80% health): Lower slash penalty (25-50%)
-/// - Unhealthy protocol (<80% health): Higher slash penalty (50-75%)
-/// 
-/// Health is calculated based on:
-/// - Yield reserve solvency (contract token balance)
-/// - Contract initialization status
-/// - Pause state
-pub fn calculate_dynamic_slash_threshold(env: &Env) -> i128 {
-    use crate::types::{MIN_DYNAMIC_SLASH_BPS, MAX_DYNAMIC_SLASH_BPS, HEALTH_THRESHOLD_BPS, BPS_DENOMINATOR};
-    
-    let cfg = config(env);
-    
-    // If dynamic threshold is disabled, return static value
-    if !cfg.dynamic_slash_threshold {
-        return cfg.slash_bps;
+pub fn loan_status(env: &Env, borrower: &Address) -> LoanStatus {
+    if let Ok(loan) = get_active_loan_record(env, borrower) {
+        return loan.status;
     }
-    
-    // Calculate protocol health score (0-10000 basis points)
-    let health_score = calculate_protocol_health_score(env);
-    
-    // If health is above threshold (80%), use lower slash penalty
-    if health_score >= HEALTH_THRESHOLD_BPS {
-        // Interpolate between MIN and static slash_bps based on health
-        // At 100% health: MIN_DYNAMIC_SLASH_BPS (25%)
-        // At 80% health: cfg.slash_bps (50% default)
-        let health_factor = (health_score - HEALTH_THRESHOLD_BPS) * BPS_DENOMINATOR / (BPS_DENOMINATOR - HEALTH_THRESHOLD_BPS);
-        cfg.slash_bps - ((cfg.slash_bps - MIN_DYNAMIC_SLASH_BPS) * health_factor / BPS_DENOMINATOR)
-    } else {
-        // Health below threshold: increase slash penalty
-        // At 80% health: cfg.slash_bps (50% default)
-        // At 0% health: MAX_DYNAMIC_SLASH_BPS (75%)
-        let health_factor = health_score * BPS_DENOMINATOR / HEALTH_THRESHOLD_BPS;
-        cfg.slash_bps + ((MAX_DYNAMIC_SLASH_BPS - cfg.slash_bps) * (BPS_DENOMINATOR - health_factor) / BPS_DENOMINATOR)
+    if let Some(loan) = get_latest_loan_record(env, borrower) {
+        return loan.status;
     }
-}
-
-/// Calculate protocol health score as basis points (0-10000).
-/// Considers multiple factors:
-/// - Yield reserve solvency (40% weight)
-/// - Contract initialization (30% weight) 
-/// - Pause state (30% weight)
-fn calculate_protocol_health_score(env: &Env) -> i128 {
-    use crate::types::BPS_DENOMINATOR;
-    
-    let mut score = 0i128;
-    
-    // Check initialization (30% weight = 3000 bps)
-    if env.storage().instance().has(&DataKey::Config) {
-        score += 3_000;
-    }
-    
-    // Check pause state (30% weight = 3000 bps)
-    let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
-    if !paused {
-        score += 3_000;
-    }
-    
-    // Check yield reserve solvency (40% weight = 4000 bps)
-    if env.storage().instance().has(&DataKey::Config) {
-        let cfg: Config = env.storage().instance().get(&DataKey::Config).unwrap();
-        let token_client = token::Client::new(env, &cfg.token);
-        let contract_balance = token_client.balance(&env.current_contract_address());
-        
-        // Scale solvency score based on balance relative to minimum threshold
-        // Minimum threshold: 10 XLM (100_000_000 stroops)
-        // Excellent threshold: 100 XLM (1_000_000_000 stroops)
-        let min_threshold = 100_000_000i128; // 10 XLM
-        let excellent_threshold = 1_000_000_000i128; // 100 XLM
-        
-        if contract_balance >= excellent_threshold {
-            score += 4_000; // Full solvency score
-        } else if contract_balance >= min_threshold {
-            // Linear interpolation between min and excellent thresholds
-            let solvency_factor = (contract_balance - min_threshold) * 4_000 / (excellent_threshold - min_threshold);
-            score += 2_000 + solvency_factor; // Base 2000 + up to 2000 more
-        } else if contract_balance > 0 {
-            // Partial score for any balance above 0
-            let solvency_factor = contract_balance * 2_000 / min_threshold;
-            score += solvency_factor;
-        }
-        // If balance is 0, add nothing to score
-    }
-    
-    // Ensure score is within bounds
-    if score > BPS_DENOMINATOR {
-        BPS_DENOMINATOR
-    } else if score < 0 {
-        0
-    } else {
-        score
-    }
+    LoanStatus::None
 }

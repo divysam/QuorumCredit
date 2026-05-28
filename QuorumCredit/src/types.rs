@@ -267,6 +267,35 @@ pub struct TokenConfig {
     pub slash_bps: i128,
 }
 
+// ── #649 Loan Subordination ───────────────────────────────────────────────────
+
+/// Priority level for loan subordination (senior loans are repaid first on default).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LoanPriority {
+    Senior,        // Repaid first in liquidation
+    Subordinated,  // Repaid after senior obligations
+}
+
+// ── #648 Milestone-Based Disbursement ────────────────────────────────────────
+
+/// Status of an individual disbursement milestone.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MilestoneStatus {
+    Pending,   // Not yet released
+    Released,  // Funds disbursed for this milestone
+}
+
+/// A single milestone in a tranche-based disbursement schedule.
+#[contracttype]
+#[derive(Clone)]
+pub struct Milestone {
+    pub amount: i128,              // tranche amount in stroops
+    pub release_timestamp: u64,   // earliest timestamp this tranche can be released
+    pub status: MilestoneStatus,
+}
+
 // ── Data Types ────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -278,6 +307,8 @@ pub struct LoanRecord {
     pub amount: i128,        // total loan principal in stroops
     pub amount_repaid: i128, // cumulative repayments received so far (principal + yield)
     pub total_yield: i128,   // yield owed to vouchers, locked in at disbursement
+    pub yield_bps: i128,     // effective yield rate (risk-adjusted) at disbursement (#646)
+    pub slash_bps: i128,     // effective slash rate (risk-adjusted) at disbursement (#646)
     pub status: LoanStatus,
     pub created_at: u64,                   // ledger timestamp
     pub disbursement_timestamp: u64,       // ledger timestamp
@@ -286,6 +317,7 @@ pub struct LoanRecord {
     pub loan_purpose: soroban_sdk::String, // borrower-supplied purpose string
     pub loan_category: LoanCategory,       // category of the loan
     pub token_address: Address,            // token used for this loan
+    pub syndicate_id: Option<u64>,         // syndicate pool ID if syndicated (#647)
 }
 
 #[contracttype]

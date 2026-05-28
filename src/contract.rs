@@ -64,8 +64,9 @@ impl QuorumCreditContract {
                 min_vouch_age_secs: DEFAULT_MIN_VOUCH_AGE_SECS,
                 prepayment_penalty_bps: 0,
                 liquidity_mining_rate_bps: DEFAULT_LIQUIDITY_MINING_RATE_BPS,
-                dynamic_slash_threshold: DEFAULT_DYNAMIC_SLASH_THRESHOLD,
-                slash_delay_seconds: DEFAULT_SLASH_DELAY_SECONDS,
+                recovery_percentage: 0,
+                redistribution_rule: RedistributionRule::Treasury,
+                immunity_period_seconds: 0,
             },
         );
 
@@ -1445,8 +1446,22 @@ impl QuorumCreditContract {
     }
 
     /// Get slash audit record for a borrower (Issue #536).
-    pub fn get_slash_audit(env: Env, borrower: Address) -> Option<crate::types::SlashAuditRecord> {
-        loan::get_slash_audit(env, borrower)
+    pub fn get_slash_record(env: Env, slash_id: u64) -> Option<crate::types::SlashRecord> {
+        governance::get_slash_record(env, slash_id)
+    }
+
+    pub fn get_slash_audit(env: Env, borrower: Address) -> Option<crate::types::SlashRecord> {
+        governance::get_slash_record_for_borrower(env, borrower)
+    }
+
+    /// Admin-only: reverse a slash and restore slashed funds to the borrower.
+    pub fn reverse_slash(
+        env: Env,
+        admin_signers: Vec<Address>,
+        slash_id: u64,
+        reason: soroban_sdk::String,
+    ) -> Result<(), ContractError> {
+        governance::reverse_slash(env, admin_signers, slash_id, reason)
     }
 
     /// Repay loan with partial payment support (Issue #538).
@@ -1506,6 +1521,42 @@ impl QuorumCreditContract {
     }
 
     // ── Issue #601: Loan Extension / Refinancing ──────────────────────────────
+
+    /// Defer the next payment, extending the loan deadline by one deferment period.
+    /// Limited to `MAX_DEFERMENT_PERIODS` (3) per loan.
+    pub fn defer_payment(env: Env, borrower: Address) -> Result<(), ContractError> {
+        loan::defer_payment(env, borrower)
+    }
+
+    /// Check if a borrower's active loan should be accelerated based on their default count
+    /// against `Config.acceleration_triggers`. Sets deadline to now if triggered.
+    /// Returns `LoanAccelerated` if a trigger condition is met.
+    pub fn check_acceleration(env: Env, borrower: Address) -> Result<(), ContractError> {
+        loan::check_acceleration(env, borrower)
+    }
+
+    /// Set a custom maturity date for an active loan. Admin-only.
+    /// Overrides the default deadline computed from loan_duration.
+    pub fn set_maturity_date(
+        env: Env,
+        admin_signers: Vec<Address>,
+        borrower: Address,
+        maturity_date: u64,
+    ) -> Result<(), ContractError> {
+        loan::set_maturity_date(env, admin_signers, borrower, maturity_date)
+    }
+
+    /// Set the interest rate type and optional index reference for an active loan. Admin-only.
+    /// Use `RateType::Variable` with a non-None `index_reference` for variable-rate loans.
+    pub fn set_loan_rate(
+        env: Env,
+        admin_signers: Vec<Address>,
+        borrower: Address,
+        rate_type: RateType,
+        index_reference: Option<soroban_sdk::String>,
+    ) -> Result<(), ContractError> {
+        loan::set_loan_rate(env, admin_signers, borrower, rate_type, index_reference)
+    }
 
     /// Request a loan extension. Requires voucher approval.
     ///
