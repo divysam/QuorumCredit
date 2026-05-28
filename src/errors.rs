@@ -57,4 +57,15 @@ pub enum ContractError {
     WithdrawalNotQueued = 47,
     /// Partial withdrawal amount exceeds the 50% cap.
     PartialWithdrawalExceedsCap = 48,
+    // #642: Collateral Diversification
+    /// A single sector contributes more than 50% of total vouched stake.
+    SectorConcentrationTooHigh = 49,
+    // #643: Loan Purpose Validation
+    /// The loan_purpose is not in the admin-configured allowed_purposes whitelist.
+    LoanPurposeNotAllowed = 50,
+    // #645: Loan Restructuring
+    /// No pending restructure request found for this borrower.
+    RestructureRequestNotFound = 51,
+    /// A restructure request is already pending for this borrower.
+    RestructureAlreadyPending = 52,
 }

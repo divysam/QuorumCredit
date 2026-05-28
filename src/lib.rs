@@ -12,7 +12,7 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, Str
 mod withdrawal_queue_test;
 
 use crate::errors::ContractError;
-use crate::helpers::{config, get_active_loan_record, has_active_loan, require_allowed_token, require_not_paused};
+use crate::helpers::{config, get_active_loan_record, has_active_loan, require_admin_approval, require_allowed_token, require_not_paused};
 use crate::types::{
     Config, DataKey, LoanRecord, LoanStatus, QueuedWithdrawal, VouchRecord,
     DEFAULT_LOAN_DURATION, DEFAULT_MAX_LOAN_TO_STAKE_RATIO, DEFAULT_MAX_VOUCHERS,
@@ -62,6 +62,8 @@ impl QuorumCreditContract {
                 grace_period: 0,
                 min_vouch_age_secs: DEFAULT_MIN_VOUCH_AGE_SECS,
                 prepayment_penalty_bps: 0,
+                allowed_purposes: Vec::new(&env),
+                insurance_premium_bps: 0,
             },
         );
 
@@ -80,6 +82,18 @@ impl QuorumCreditContract {
         token: Address,
     ) -> Result<(), ContractError> {
         vouch::vouch(env, voucher, borrower, stake, token)
+    }
+
+    /// #642: Vouch with an explicit sector label for diversification enforcement.
+    pub fn vouch_with_sector(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+        stake: i128,
+        token: Address,
+        sector: String,
+    ) -> Result<(), ContractError> {
+        vouch::vouch_with_sector(env, voucher, borrower, stake, token, sector)
     }
 
     pub fn batch_vouch(
@@ -197,6 +211,44 @@ impl QuorumCreditContract {
             return Err(ContractError::InsufficientFunds);
         }
 
+        // #643: Validate loan_purpose against allowed_purposes whitelist (empty = all allowed)
+        if !cfg.allowed_purposes.is_empty() {
+            let purpose_allowed = cfg.allowed_purposes.iter().any(|p| p == loan_purpose);
+            if !purpose_allowed {
+                return Err(ContractError::LoanPurposeNotAllowed);
+            }
+        }
+
+        // #642: Enforce sector diversification — no single sector may contribute > 50% of total stake
+        if total_stake > 0 {
+            let mut sector_names: Vec<soroban_sdk::String> = Vec::new(&env);
+            let mut sector_amounts: Vec<i128> = Vec::new(&env);
+            for v in vouches.iter() {
+                if v.token != token_addr {
+                    continue;
+                }
+                let mut found = false;
+                for i in 0..sector_names.len() {
+                    if sector_names.get(i).unwrap() == v.sector {
+                        let cur = sector_amounts.get(i).unwrap();
+                        sector_amounts.set(i, cur + v.stake);
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    sector_names.push_back(v.sector.clone());
+                    sector_amounts.push_back(v.stake);
+                }
+            }
+            for i in 0..sector_amounts.len() {
+                let s_stake = sector_amounts.get(i).unwrap();
+                if s_stake * 2 > total_stake {
+                    return Err(ContractError::SectorConcentrationTooHigh);
+                }
+            }
+        }
+
         let now = env.ledger().timestamp();
         let loan_id: u64 = env
             .storage()
@@ -235,6 +287,22 @@ impl QuorumCreditContract {
         env.storage()
             .persistent()
             .set(&DataKey::ActiveLoan(borrower.clone()), &loan_id);
+
+        // #644: Collect insurance premium from borrower if configured
+        if cfg.insurance_premium_bps > 0 {
+            let premium = amount * cfg.insurance_premium_bps / 10_000;
+            if premium > 0 {
+                token_client.transfer(&borrower, &env.current_contract_address(), &premium);
+                let pool_balance: i128 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::InsurancePool)
+                    .unwrap_or(0);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::InsurancePool, &(pool_balance + premium));
+            }
+        }
 
         token_client.transfer(&env.current_contract_address(), &borrower, &amount);
 
@@ -345,5 +413,201 @@ impl QuorumCreditContract {
             .get(&DataKey::Vouches(borrower))
             .unwrap_or(Vec::new(&env));
         vouches.iter().any(|v| v.voucher == voucher)
+    }
+
+    // ─────────────────────────────────────────────
+    // Admin: #643 Loan Purpose Whitelist
+    // ─────────────────────────────────────────────
+
+    /// #643: Set the allowed loan purposes whitelist. Empty = all purposes allowed.
+    pub fn set_allowed_purposes(
+        env: Env,
+        admin_signers: Vec<Address>,
+        purposes: Vec<String>,
+    ) -> Result<(), ContractError> {
+        require_admin_approval(&env, &admin_signers)?;
+        let mut cfg = config(&env);
+        cfg.allowed_purposes = purposes;
+        env.storage().instance().set(&DataKey::Config, &cfg);
+        Ok(())
+    }
+
+    // ─────────────────────────────────────────────
+    // Admin: #644 Insurance Premium
+    // ─────────────────────────────────────────────
+
+    /// #644: Set the insurance premium in basis points (0 = disabled).
+    pub fn set_insurance_premium_bps(
+        env: Env,
+        admin_signers: Vec<Address>,
+        bps: i128,
+    ) -> Result<(), ContractError> {
+        require_admin_approval(&env, &admin_signers)?;
+        if bps < 0 || bps > 10_000 {
+            return Err(ContractError::InvalidAmount);
+        }
+        let mut cfg = config(&env);
+        cfg.insurance_premium_bps = bps;
+        env.storage().instance().set(&DataKey::Config, &cfg);
+        Ok(())
+    }
+
+    /// #644: Get the current insurance pool balance.
+    pub fn get_insurance_pool_balance(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InsurancePool)
+            .unwrap_or(0)
+    }
+
+    // ─────────────────────────────────────────────
+    // #645: Loan Restructuring
+    // ─────────────────────────────────────────────
+
+    /// #645: Borrower requests a loan restructure (extend deadline / reduce outstanding amount).
+    /// Vouchers must all approve before the restructure takes effect.
+    pub fn restructure_loan(
+        env: Env,
+        borrower: Address,
+        new_deadline: u64,
+        new_amount: i128,
+    ) -> Result<(), ContractError> {
+        borrower.require_auth();
+        require_not_paused(&env)?;
+
+        let loan_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveLoan(borrower.clone()))
+            .ok_or(ContractError::NoActiveLoan)?;
+        let loan: LoanRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Loan(loan_id))
+            .ok_or(ContractError::NoActiveLoan)?;
+
+        if new_deadline <= loan.deadline {
+            return Err(ContractError::InvalidAmount);
+        }
+        if new_amount != 0 {
+            let outstanding = loan.amount + loan.total_yield - loan.amount_repaid;
+            if new_amount <= 0 || new_amount > outstanding {
+                return Err(ContractError::InvalidAmount);
+            }
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::RestructureRequest(borrower.clone()))
+        {
+            return Err(ContractError::RestructureAlreadyPending);
+        }
+
+        let request = crate::types::RestructureRequest {
+            borrower: borrower.clone(),
+            new_deadline,
+            new_amount,
+            requested_at: env.ledger().timestamp(),
+            approvals: Vec::new(&env),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RestructureRequest(borrower.clone()), &request);
+
+        env.events().publish(
+            (symbol_short!("loan"), symbol_short!("restruct")),
+            (borrower, new_deadline, new_amount),
+        );
+
+        Ok(())
+    }
+
+    /// #645: A voucher approves a pending restructure request.
+    /// Once all vouchers approve, the loan is updated.
+    pub fn approve_restructure(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+    ) -> Result<(), ContractError> {
+        voucher.require_auth();
+        require_not_paused(&env)?;
+
+        let mut request: crate::types::RestructureRequest = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RestructureRequest(borrower.clone()))
+            .ok_or(ContractError::RestructureRequestNotFound)?;
+
+        let vouches: Vec<VouchRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vouches(borrower.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        if !vouches.iter().any(|v| v.voucher == voucher) {
+            return Err(ContractError::UnauthorizedCaller);
+        }
+
+        if request.approvals.iter().any(|a| a == voucher) {
+            return Err(ContractError::AlreadyVoted);
+        }
+
+        request.approvals.push_back(voucher.clone());
+
+        let all_approved = vouches
+            .iter()
+            .all(|v| request.approvals.iter().any(|a| a == v.voucher));
+
+        if all_approved {
+            let loan_id: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::ActiveLoan(borrower.clone()))
+                .ok_or(ContractError::NoActiveLoan)?;
+            let mut loan: LoanRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Loan(loan_id))
+                .ok_or(ContractError::NoActiveLoan)?;
+
+            loan.deadline = request.new_deadline;
+            if request.new_amount > 0 {
+                let outstanding = loan.amount + loan.total_yield - loan.amount_repaid;
+                let forgiven = outstanding - request.new_amount;
+                if forgiven > 0 && forgiven <= loan.total_yield {
+                    loan.total_yield -= forgiven;
+                }
+            }
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::Loan(loan.id), &loan);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::RestructureRequest(borrower.clone()));
+
+            env.events().publish(
+                (symbol_short!("loan"), symbol_short!("rst_done")),
+                (borrower, loan.deadline),
+            );
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::RestructureRequest(borrower.clone()), &request);
+        }
+
+        Ok(())
+    }
+
+    /// #645: Get the pending restructure request for a borrower, if any.
+    pub fn get_restructure_request(
+        env: Env,
+        borrower: Address,
+    ) -> Option<crate::types::RestructureRequest> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RestructureRequest(borrower))
     }
 }

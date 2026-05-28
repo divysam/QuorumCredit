@@ -180,6 +180,8 @@ pub enum DataKey {
     VoucherStats(Address),
     /// Withdrawal queue: borrower → Vec<QueuedWithdrawal>
     WithdrawalQueue(Address),
+    /// #645: borrower → RestructureRequest (pending restructure)
+    RestructureRequest(Address),
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -231,6 +233,10 @@ pub struct Config {
     /// Prepayment penalty in basis points (e.g. 100 = 1%). Applied to remaining principal
     /// when a borrower repays early. 0 means no penalty.
     pub prepayment_penalty_bps: u32,
+    /// #643: Whitelist of allowed loan purposes. Empty = all purposes allowed.
+    pub allowed_purposes: Vec<soroban_sdk::String>,
+    /// #644: Insurance premium in basis points charged at loan disbursement (0 = no insurance).
+    pub insurance_premium_bps: i128,
 }
 
 // ── Data Types ────────────────────────────────────────────────────────────────
@@ -277,6 +283,21 @@ pub struct LoanRecord {
     pub risk_score: u32,
 }
 
+/// #645: Pending loan restructure request — borrower requests, vouchers approve.
+#[contracttype]
+#[derive(Clone)]
+pub struct RestructureRequest {
+    pub borrower: Address,
+    /// New deadline (must be after current deadline).
+    pub new_deadline: u64,
+    /// Reduced outstanding amount (0 = no change to amount).
+    pub new_amount: i128,
+    /// Ledger timestamp when the request was created.
+    pub requested_at: u64,
+    /// Voucher addresses that have approved this request.
+    pub approvals: Vec<Address>,
+}
+
 /// A single payment event recorded against a loan.
 #[contracttype]
 #[derive(Clone)]
@@ -303,6 +324,8 @@ pub struct VouchRecord {
     pub expiry_timestamp: Option<u64>,
     /// Optional delegate address; if set, this address can manage the vouch.
     pub delegate: Option<Address>,
+    /// #642: Sector/region of the voucher for diversification enforcement (empty = unspecified).
+    pub sector: soroban_sdk::String,
 }
 
 #[contracttype]

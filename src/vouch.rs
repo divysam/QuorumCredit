@@ -54,7 +54,23 @@ pub fn vouch(
     voucher.require_auth();
     require_not_paused(&env)?;
     let cfg = VouchConfig::load(&env);
-    do_vouch(&env, &cfg, voucher, borrower, stake, token)
+    let sector = soroban_sdk::String::from_str(&env, "");
+    do_vouch(&env, &cfg, voucher, borrower, stake, token, sector)
+}
+
+/// #642: Vouch with an explicit sector label for diversification enforcement.
+pub fn vouch_with_sector(
+    env: Env,
+    voucher: Address,
+    borrower: Address,
+    stake: i128,
+    token: Address,
+    sector: soroban_sdk::String,
+) -> Result<(), ContractError> {
+    voucher.require_auth();
+    require_not_paused(&env)?;
+    let cfg = VouchConfig::load(&env);
+    do_vouch(&env, &cfg, voucher, borrower, stake, token, sector)
 }
 
 fn validate_vouch<'a>(
@@ -144,6 +160,7 @@ fn commit_vouch(
     stake: i128,
     token: Address,
     mut vouches: Vec<VouchRecord>,
+    sector: soroban_sdk::String,
 ) -> Result<(), ContractError> {
     let contract = env.current_contract_address();
 
@@ -178,6 +195,7 @@ fn commit_vouch(
         token: token.clone(),
         expiry_timestamp: None,
         delegate: None,
+        sector: sector.clone(),
     });
 
     env.storage()
@@ -226,9 +244,10 @@ fn do_vouch(
     borrower: Address,
     stake: i128,
     token: Address,
+    sector: soroban_sdk::String,
 ) -> Result<(), ContractError> {
     let (token_client, vouches) = validate_vouch(env, cfg, &voucher, &borrower, stake, &token)?;
-    commit_vouch(env, &token_client, voucher, borrower, stake, token, vouches)
+    commit_vouch(env, &token_client, voucher, borrower, stake, token, vouches, sector)
 }
 
 pub fn batch_vouch(
@@ -264,7 +283,7 @@ pub fn batch_vouch(
             .persistent()
             .get(&DataKey::Vouches(borrower.clone()))
             .unwrap_or(Vec::new(&env));
-        commit_vouch(&env, &token_client, voucher.clone(), borrower, stake, token.clone(), vouches)?;
+        commit_vouch(&env, &token_client, voucher.clone(), borrower, stake, token.clone(), vouches, soroban_sdk::String::from_str(&env, ""))?;
     }
 
     Ok(())

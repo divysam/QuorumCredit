@@ -48,6 +48,23 @@ pub fn get_active_loan_record(env: &Env, borrower: &Address) -> Result<LoanRecor
         .ok_or(ContractError::NoActiveLoan)
 }
 
+/// Verifies that at least `admin_threshold` of the provided `signers` are
+/// registered admins and calls `require_auth()` on each of them.
+pub fn require_admin_approval(env: &Env, signers: &soroban_sdk::Vec<Address>) -> Result<(), ContractError> {
+    let cfg = config(env);
+    let mut approved: u32 = 0;
+    for signer in signers.iter() {
+        if cfg.admins.iter().any(|a| a == signer) {
+            signer.require_auth();
+            approved += 1;
+        }
+    }
+    if approved < cfg.admin_threshold {
+        return Err(ContractError::InvalidAmount);
+    }
+    Ok(())
+}
+
 /// Returns a token client for `addr` after verifying it is an allowed token
 /// (either the primary protocol token or in `Config.allowed_tokens`).
 pub fn require_allowed_token<'a>(
