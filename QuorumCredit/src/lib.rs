@@ -31,8 +31,6 @@ mod bug_condition_test;
 #[cfg(test)]
 mod borrower_whitelist_test;
 #[cfg(test)]
-mod bug_condition_test;
-#[cfg(test)]
 mod config_bps_test;
 #[cfg(test)]
 mod double_repay_test;
@@ -94,6 +92,14 @@ mod initialize_admin_threshold_test;
 mod invariants_test;
 #[cfg(test)]
 mod regression_tests;
+#[cfg(test)]
+mod vouch_pooling_test;
+#[cfg(test)]
+mod vouch_conflict_detection_test;
+#[cfg(test)]
+mod vouch_min_duration_test;
+#[cfg(test)]
+mod amortization_schedule_test;
 
 pub use errors::ContractError;
 pub use types::*;
@@ -203,6 +209,25 @@ impl QuorumCreditContract {
         borrower: Address,
     ) -> Result<(), ContractError> {
         vouch::transfer_vouch(env, from, to, borrower)
+    }
+
+    // ── Vouch Pooling (#638) ──────────────────────────────────────────────────
+
+    pub fn create_vouch_pool(env: Env, creator: Address, borrower: Address) -> u64 {
+        vouch::create_vouch_pool(env, creator, borrower)
+    }
+
+    pub fn join_vouch_pool(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+        pool_id: u64,
+    ) -> Result<(), ContractError> {
+        vouch::join_vouch_pool(env, voucher, borrower, pool_id)
+    }
+
+    pub fn get_vouch_pool(env: Env, pool_id: u64) -> Option<crate::types::VouchPool> {
+        vouch::get_vouch_pool(env, pool_id)
     }
 
     // ── Loan ──────────────────────────────────────────────────────────────────
@@ -482,6 +507,26 @@ impl QuorumCreditContract {
 
     pub fn set_grace_period(env: Env, admin_signers: Vec<Address>, period: u64) {
         admin::set_grace_period(env, admin_signers, period)
+    }
+
+    /// Issue #639: Set the max number of active-loan borrowers a voucher may back (0 = no limit).
+    pub fn set_conflict_threshold(env: Env, admin_signers: Vec<Address>, threshold: u32) {
+        helpers::require_admin_approval(&env, &admin_signers);
+        env.storage().instance().set(&DataKey::ConflictThreshold, &threshold);
+    }
+
+    pub fn get_conflict_threshold(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::ConflictThreshold).unwrap_or(0)
+    }
+
+    /// Issue #640: Set the minimum seconds a vouch must be held before withdrawal (0 = no minimum).
+    pub fn set_min_vouch_duration(env: Env, admin_signers: Vec<Address>, duration_secs: u64) {
+        helpers::require_admin_approval(&env, &admin_signers);
+        env.storage().instance().set(&DataKey::MinVouchDurationSeconds, &duration_secs);
+    }
+
+    pub fn get_min_vouch_duration(env: Env) -> u64 {
+        env.storage().instance().get(&DataKey::MinVouchDurationSeconds).unwrap_or(0)
     }
 
     pub fn add_allowed_token(

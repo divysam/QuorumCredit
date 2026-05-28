@@ -100,14 +100,14 @@ impl PauseFlag {
 pub struct DisputeRecord {
     pub borrower: Address,
     pub loan_id: u64,
-    pub evidence_hash: soroban_sdk::String, // IPFS or other evidence reference
-    pub disputed_at: u64,                    // timestamp when dispute was filed
-    pub resolved: bool,                      // true if dispute has been resolved
-    pub resolved_at: Option<u64>,            // timestamp when resolved
-    pub resolution: Option<DisputeResolution>, // outcome of the dispute
-    pub voters: Vec<Address>,                // vouchers who voted on dispute
-    pub approve_votes: i128,                 // stake voting to uphold dispute
-    pub reject_votes: i128,                  // stake voting to reject dispute
+    pub evidence_hash: soroban_sdk::String,
+    pub disputed_at: u64,
+    pub resolved: bool,
+    pub resolved_at: u64,        // 0 if not resolved
+    pub upheld: bool,            // true if dispute was upheld (slash reversed)
+    pub voters: Vec<Address>,
+    pub approve_votes: i128,
+    pub reject_votes: i128,
 }
 
 #[contracttype]
@@ -115,6 +115,24 @@ pub struct DisputeRecord {
 pub enum DisputeResolution {
     Upheld,   // Dispute valid, slash reversed
     Rejected, // Dispute invalid, slash stands
+}
+
+// ── Composite Storage Key Helpers ─────────────────────────────────────────────
+
+/// Key for VouchGraph: maps (voucher, borrower) → depth u32
+#[contracttype]
+#[derive(Clone)]
+pub struct VouchGraphKey {
+    pub voucher: Address,
+    pub borrower: Address,
+}
+
+/// Key for VoucherStakeLimit: maps (voucher, borrower) → i128 max stake
+#[contracttype]
+#[derive(Clone)]
+pub struct VoucherStakeLimitKey {
+    pub voucher: Address,
+    pub borrower: Address,
 }
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
@@ -130,46 +148,47 @@ pub enum DataKey {
     Deployer,                    // Address that deployed the contract; guards initialize
     SlashTreasury,               // i128 accumulated slashed funds
     Paused,                      // bool: true when contract is paused
-    BorrowerList,                // Vec<Address> of all borrowers who have ever requested a loan
     ReputationNft,               // Address of the ReputationNftContract
     MinStake,                    // i128 minimum stake amount per vouch
     MaxLoanAmount,               // i128 maximum individual loan size (0 = no cap)
-    MinVouchers,     // u32 minimum number of distinct vouchers required (0 = no minimum)
-    LoanCounter,     // u64: monotonically increasing loan ID counter
-    LoanPool(u64),   // pool_id → LoanPoolRecord
-    LoanPoolCounter, // u64: monotonically increasing pool ID counter
-    PendingAdmin,    // Address of the pending admin (two-step transfer)
-    RepaymentCount(Address), // borrower → u32 total successful repayments
-    LoanCount(Address), // borrower → u32 total historical loans disbursed
-    DefaultCount(Address), // borrower → u32 total defaults (slash + auto_slash + claim_expired)
-    ProtocolFeeBps,  // u32: protocol fee in basis points
-    FeeTreasury,     // Address: recipient of collected protocol fees
+    LoanCounter,                 // u64: monotonically increasing loan ID counter
+    VouchPool(u64),              // pool_id → VouchPool (#638)
+    VouchPoolCounter,            // u64: monotonically increasing vouch pool ID counter (#638)
+    ConflictThreshold,           // u32 max active-loan borrowers a voucher may back (#639)
+    MinVouchDurationSeconds,     // u64 minimum seconds a vouch must be held (#640)
+    RepaymentCount(Address),     // borrower → u32 total successful repayments
+    LoanCount(Address),          // borrower → u32 total historical loans disbursed
+    DefaultCount(Address),       // borrower → u32 total defaults
+    ProtocolFeeBps,              // u32: protocol fee in basis points
+    FeeTreasury,                 // Address: recipient of collected protocol fees
     LastVouchTimestamp(Address), // voucher → u64 last vouch timestamp
-    Timelock(u64),   // proposal_id → TimelockProposal
-    TimelockCounter, // u64 monotonically increasing proposal ID
-    Blacklisted(Address), // borrower → bool permanently banned
-    VoucherWhitelist(Address), // voucher → bool allowed to vouch
-    VoucherWhitelistEnabled, // bool: true when voucher whitelist is enforced
-    BorrowerWhitelist(Address), // borrower → bool allowed to request loans
-    BorrowerWhitelistEnabled, // bool: true when borrower whitelist is enforced
-    TokenConfig(Address), // token → TokenConfig (per-token yield/slash overrides)
-    ExtensionConsents(Address), // borrower → Vec<Address> vouchers who consented to extension
-    SlashVote(Address), // borrower → SlashVoteRecord
-    SlashVoteQuorum, // u32 quorum in basis points (e.g. 5000 = 50%)
-    ReferredBy(Address), // borrower → Address of referrer
-    ReferralBonusBps, // u32 referral bonus in basis points (default 100 = 1%)
-    AdminAuditLog,   // Vec<AdminAuditEntry> audit log of all admin actions
-    AdminKeyExpiry(Address), // admin → u64 expiry timestamp (0 = no expiry)
-    GovernanceToken, // Address of governance token for voting
-    GovernanceProposal(u64), // proposal_id → GovernanceProposal
-    GovernanceProposalCounter, // u64 monotonically increasing proposal ID
-    AdminActionTimelock(u64), // action_id → AdminTimelockAction
-    AdminActionTimelockCounter, // u64 monotonically increasing action ID
-    GovernanceTokenAddress, // Address of governance token for voting
-    LargeLoanApproval(Address), // borrower → LargeLoanApprovalRecord
-    LargeLoanRequest(Address), // borrower → LargeLoanRequestRecord
-    VouchGraph(Address, Address), // (voucher, borrower) → depth u32
+    Timelock(u64),               // proposal_id → TimelockProposal
+    TimelockCounter,             // u64 monotonically increasing proposal ID
+    Blacklisted(Address),        // borrower → bool permanently banned
+    VoucherWhitelist(Address),   // voucher → bool allowed to vouch
+    VoucherWhitelistEnabled,     // bool: true when voucher whitelist is enforced
+    BorrowerWhitelist(Address),  // borrower → bool allowed to request loans
+    BorrowerWhitelistEnabled,    // bool: true when borrower whitelist is enforced
+    TokenConfig(Address),        // token → TokenConfig (per-token yield/slash overrides)
+    SlashVote(Address),          // borrower → SlashVoteRecord
+    SlashVoteQuorum,             // u32 quorum in basis points (e.g. 5000 = 50%)
+    ReferredBy(Address),         // borrower → Address of referrer
+    ReferralBonusBps,            // u32 referral bonus in basis points
+    AdminAuditLog,               // Vec<AdminAuditEntry> audit log of all admin actions
+    AdminKeyExpiry(Address),     // admin → u64 expiry timestamp (0 = no expiry)
+    GovernanceToken,             // Address of governance token for voting
+    GovernanceProposal(u64),     // proposal_id → GovernanceProposal
+    GovernanceProposalCounter,   // u64 monotonically increasing proposal ID
+    LargeLoanApproval(Address),  // borrower → LargeLoanApprovalRecord
+    LargeLoanRequest(Address),   // borrower → LargeLoanRequestRecord
+    VouchGraph(VouchGraphKey),   // (voucher, borrower) → depth u32
     LoanCategoryLoans(LoanCategory), // category → Vec<loan_id>
+    VoucherStakeLimit(VoucherStakeLimitKey), // (voucher, borrower) → i128 max stake
+    TotalLoans,                  // i128 total active loan principal
+    TotalStaked,                 // i128 total staked collateral
+    Dispute(u64),                // dispute_id → DisputeRecord
+    DisputeCounter,              // u64 monotonically increasing dispute ID
+    DisputeWindowSecs,           // u64 dispute window in seconds
 }
 
 // ── Audit Log ─────────────────────────────────────────────────────────────────
@@ -255,6 +274,18 @@ pub struct TokenConfig {
     pub slash_bps: i128,
 }
 
+// ── Amortization (#641) ───────────────────────────────────────────────────────
+
+/// A single installment in a loan's amortization schedule.
+#[contracttype]
+#[derive(Clone)]
+pub struct AmortizationEntry {
+    pub installment_number: u32, // 1-based
+    pub due_timestamp: u64,      // when this payment is due
+    pub amount_due: i128,        // amount due for this installment (in stroops)
+    pub paid: bool,              // true once this installment has been paid
+}
+
 // ── Data Types ────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -274,6 +305,8 @@ pub struct LoanRecord {
     pub loan_purpose: soroban_sdk::String, // borrower-supplied purpose string
     pub loan_category: LoanCategory,       // category of the loan
     pub token_address: Address,            // token used for this loan
+    /// Issue #641: amortization schedule (empty = bullet repayment)
+    pub amortization_schedule: Vec<AmortizationEntry>,
 }
 
 #[contracttype]
@@ -305,6 +338,18 @@ pub struct VouchRecord {
     pub amount: i128,         // in stroops
     pub vouch_timestamp: u64, // ledger timestamp when vouch was created; immutable after set
     pub token: Address,       // token this stake is denominated in
+    pub pool_id: Option<u64>, // optional pool this vouch belongs to (#638)
+}
+
+// ── Vouch Pool (#638) ─────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone)]
+pub struct VouchPool {
+    pub pool_id: u64,
+    pub borrower: Address,
+    pub members: Vec<Address>, // vouchers in this pool
+    pub created_at: u64,
 }
 
 #[contracttype]
