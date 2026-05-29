@@ -41,6 +41,8 @@ mod repay_protocol_fee_test;
 mod is_eligible_token_filter_test;
 #[cfg(test)]
 mod vote_slash_auto_execute_test;
+#[cfg(test)]
+mod compliance_test;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 
