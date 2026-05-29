@@ -1,3 +1,7 @@
+[workspace]
+members = ["QuorumCredit", "api"]
+resolver = "2"
+
 [package]
 name = "quorum_credit"
 version = "0.1.0"
