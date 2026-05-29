@@ -6,6 +6,9 @@ mod errors;
 mod governance;
 mod helpers;
 mod key_manager;
+mod metrics;
+mod openapi;
+mod search;
 mod secure_delete;
 mod secure_random;
 mod types;
@@ -871,5 +874,67 @@ impl QuorumCreditContract {
         enabled: bool,
     ) {
         admin::set_confirmation_required(env, admin_signers, enabled)
+    }
+
+    // ── Issue #726: API Search ────────────────────────────────────────────────
+
+    /// Search loans by query string
+    pub fn search_loans(
+        env: Env,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<LoanRecord>, ContractError> {
+        search::search_loans(env, query, limit)
+    }
+
+    /// Search vouches for a borrower
+    pub fn search_vouches(
+        env: Env,
+        borrower: Address,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<VouchRecord>, ContractError> {
+        search::search_vouches(env, borrower, query, limit)
+    }
+
+    /// Get loans by status
+    pub fn get_loans_by_status(
+        env: Env,
+        status: String,
+        limit: u32,
+    ) -> Result<Vec<LoanRecord>, ContractError> {
+        search::get_loans_by_status(env, status, limit)
+    }
+
+    /// Get top vouchers by total stake
+    pub fn get_top_vouchers(
+        env: Env,
+        limit: u32,
+    ) -> Result<Vec<(Address, i128)>, ContractError> {
+        search::get_top_vouchers(env, limit)
+    }
+
+    // ── Issue #727: Prometheus Metrics ────────────────────────────────────────
+
+    /// Get current metrics
+    pub fn get_metrics(env: Env) -> metrics::Metrics {
+        metrics::get_metrics(env)
+    }
+
+    /// Get Prometheus-formatted metrics
+    pub fn get_prometheus_metrics(env: Env) -> String {
+        metrics::format_prometheus_metrics(env)
+    }
+
+    // ── Issue #728: API Documentation ────────────────────────────────────────
+
+    /// Get OpenAPI 3.0 schema
+    pub fn get_openapi_schema(env: Env) -> String {
+        openapi::generate_openapi_schema(env)
+    }
+
+    /// Get API documentation in Markdown
+    pub fn get_api_documentation(env: Env) -> String {
+        openapi::generate_api_documentation(env)
     }
 }

@@ -292,6 +292,14 @@ pub enum DataKey {
     VoucherInsurance(Address, Address),
     /// Cross-chain bridge validation status: (voucher, chain_id) → bool.
     BridgeValidated(Address, u32),
+    // #727: Metrics tracking
+    LoanCount,
+    ActiveLoanCount,
+    VouchCount,
+    TotalStake,
+    TotalYieldDistributed,
+    TotalSlashed,
+    ContractBalance,
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
