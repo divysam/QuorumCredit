@@ -33,6 +33,8 @@ mod withdrawal_queue_test;
 mod cross_chain_vouch_test;
 #[cfg(test)]
 mod property_stake_loan_invariants_test;
+#[cfg(test)]
+mod admin_whitelist_blacklist_test;
 
 use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
@@ -57,7 +59,13 @@ impl QuorumCreditContract {
             return Err(ContractError::AlreadyInitialized);
         }
 
-        helpers::validate_admin_config(&env, &admins, admin_threshold)?;
+        helpers::validate_admin_config(
+            &env,
+            &admins,
+            admin_threshold,
+            &Vec::new(&env),
+            &Vec::new(&env),
+        )?;
         helpers::require_valid_token(&env, &token)?;
 
         env.storage().instance().set(&DataKey::Deployer, &deployer);
@@ -66,6 +74,8 @@ impl QuorumCreditContract {
             &Config {
                 admins,
                 admin_threshold,
+                admin_whitelist: Vec::new(&env),
+                admin_blacklist: Vec::new(&env),
                 token,
                 allowed_tokens: Vec::new(&env),
                 yield_bps: DEFAULT_YIELD_BPS,
@@ -84,6 +94,7 @@ impl QuorumCreditContract {
                 early_repayment_discount_bps: 0,
                 oracle_address: None,
                 slash_delay_seconds: 0,
+                successor_admin: None,
             },
         );
 
@@ -794,6 +805,20 @@ impl QuorumCreditContract {
         governance::get_slash_threshold_proposal(env, proposal_id)
     }
 
+    // ── Admin management ─────────────────────────────────────────────────────
+
+    pub fn add_admin(env: Env, admin_signers: Vec<Address>, new_admin: Address) {
+        admin::add_admin(env, admin_signers, new_admin)
+    }
+
+    pub fn remove_admin(env: Env, admin_signers: Vec<Address>, admin_to_remove: Address) {
+        admin::remove_admin(env, admin_signers, admin_to_remove)
+    }
+
+    pub fn set_admin_threshold(env: Env, admin_signers: Vec<Address>, new_threshold: u32) {
+        admin::set_admin_threshold(env, admin_signers, new_threshold)
+    }
+
     // ── Admin ─────────────────────────────────────────────────────────────────
 
     pub fn pause(env: Env, admin_signers: Vec<Address>) {
@@ -813,6 +838,26 @@ impl QuorumCreditContract {
 
     pub fn set_config(env: Env, admin_signers: Vec<Address>, cfg: Config) {
         admin::set_config(env, admin_signers, cfg)
+    }
+
+    // ── Issue #688: Admin whitelist management ────────────────────────────────
+
+    pub fn add_to_admin_whitelist(env: Env, admin_signers: Vec<Address>, address: Address) {
+        admin::add_to_admin_whitelist(env, admin_signers, address)
+    }
+
+    pub fn remove_from_admin_whitelist(env: Env, admin_signers: Vec<Address>, address: Address) {
+        admin::remove_from_admin_whitelist(env, admin_signers, address)
+    }
+
+    // ── Issue #689: Admin blacklist management ────────────────────────────────
+
+    pub fn add_to_admin_blacklist(env: Env, admin_signers: Vec<Address>, address: Address) {
+        admin::add_to_admin_blacklist(env, admin_signers, address)
+    }
+
+    pub fn remove_from_admin_blacklist(env: Env, admin_signers: Vec<Address>, address: Address) {
+        admin::remove_from_admin_blacklist(env, admin_signers, address)
     }
 
     pub fn update_config(
@@ -873,5 +918,17 @@ impl QuorumCreditContract {
         enabled: bool,
     ) {
         admin::set_confirmation_required(env, admin_signers, enabled)
+    }
+
+    pub fn set_successor_admin(
+        env: Env,
+        admin_signers: Vec<Address>,
+        successor: Option<Address>,
+    ) {
+        admin::set_successor_admin(env, admin_signers, successor)
+    }
+
+    pub fn claim_successor_admin(env: Env) -> Result<(), ContractError> {
+        admin::claim_successor_admin(env)
     }
 }

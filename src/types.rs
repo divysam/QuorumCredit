@@ -240,10 +240,66 @@ pub enum DataKey {
     InsuranceVoucherClaim(u64, Address), // (loan_id, voucher) → i128 amount already claimed
     VouchHistory(Address, Address, Address), // (borrower, voucher, token) → Vec<VouchHistoryEntry>
     VouchDelegation(Address, Address, Address), // (borrower, original_voucher, token) → Address (delegate)
-    ApiVersion,              // ApiVersion: contract API version (Issue #723)
-    LoanCache(u64),          // loan_id → CachedLoanRecord (Issue #724)
-    VouchesCache(Address),   // borrower → CachedVouchesRecord (Issue #724)
-    ConfigCache,             // CachedConfigRecord (Issue #724)
+    PendingSlashExecution(Address), // borrower → PendingSlashRecord
+    YieldReserve,            // i128 balance of the yield reserve
+    SlashEscrow(Address),    // borrower → (i128 amount, u64 release_timestamp)
+    SlashAudit(Address),     // borrower → SlashRecord (latest slash for borrower)
+    SlashRecord(u64),        // slash_id → SlashRecord
+    SlashRecordCounter,      // u64 monotonic slash ID counter
+    BorrowerRegistered(Address), // borrower → registration timestamp
+    // Issue #598-601 additions
+    PrepaymentPenaltyBps,    // u32: prepayment penalty in basis points
+    YieldDistribution(u64),  // loan_id → Vec<YieldDistributionEntry>
+    AdminAction(u64),        // action_id → AdminActionProposal
+    AdminActionCounter,      // u64: monotonically increasing admin action ID
+    SlashAppeal(Address, Address), // (borrower, voucher) → SlashAppealRecord
+    /// Slash-threshold governance proposal id → proposal record.
+    SlashThresholdProposal(u64),
+    SlashThresholdProposalCounter,
+    /// Per-borrower timestamp of the last successful slash.
+    LastSlashedAt(Address),
+    /// Admin config-update proposal id → proposal record.
+    ConfigUpdateProposal(u64),
+    ConfigUpdateProposalCounter,
+    /// Issue #599/#600: (voucher, borrower) → WithdrawalRequest (pending timelock withdrawal)
+    PendingWithdrawal(Address, Address),
+    /// Issue #601: borrower → LoanExtensionRequest
+    LoanExtension(Address),
+    /// Issue #598: loan_id → Vec<PaymentRecord> (payment history)
+    PaymentHistory(u64),
+    /// Voucher cumulative reputation stats: voucher → VoucherStats
+    VoucherStats(Address),
+    /// Withdrawal queue: borrower → Vec<QueuedWithdrawal>
+    WithdrawalQueue(Address),
+    // #634: Liquidity Mining
+    LastMiningClaim(Address),
+    // #635: Vouch Snapshot for Governance
+    VouchSnapshot(u32),
+    // #636: Staking Derivatives
+    StakingDerivative(Address, Address),
+    // #637: Fraud Detection
+    VoucherFraudScore(Address),
+    // #667: Oracle address for repayment verification
+    OracleAddress,
+    // #667: External credit score per borrower
+    ExternalCreditScore(Address),
+    // #666: Escrowed repayment amount per borrower (held pending oracle verification)
+    EscrowAmount(Address),
+    /// Monthly slashing transparency report: month_id → SlashingReportRecord.
+    /// month_id = unix_timestamp / MONTHLY_PERIOD_SECS
+    SlashingReport(u64),
+    /// Per-vouch insurance opt-in: (voucher, borrower) → bool (insured).
+    VoucherInsurance(Address, Address),
+    /// Cross-chain bridge validation status: (voucher, chain_id) → bool.
+    BridgeValidated(Address, u32),
+    /// Issue #687: admin removal proposal id → AdminRemovalProposal
+    AdminRemovalProposal(u64),
+    /// Issue #687: monotonically increasing admin removal proposal counter
+    AdminRemovalProposalCounter,
+    /// Issue #686: accumulated admin compensation pool balance (i128 stroops)
+    AdminCompensation,
+    /// Issue #686: last compensation claim timestamp per admin address
+    AdminLastClaim(Address),
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -303,6 +359,11 @@ pub struct ConfigUpdateProposal {
 pub struct Config {
     pub admins: Vec<Address>,
     pub admin_threshold: u32,
+    /// Admin addresses that are permitted to be configured as admins.
+    /// If empty, any valid admin address may be used.
+    pub admin_whitelist: Vec<Address>,
+    /// Admin addresses that are explicitly forbidden from being configured as admins.
+    pub admin_blacklist: Vec<Address>,
     /// Primary token contract address used for loans and vouches.
     pub token: Address,
     /// Additional token contract addresses accepted for loans/vouches.
@@ -342,6 +403,9 @@ pub struct Config {
     pub oracle_address: Option<soroban_sdk::Address>,
     /// Delay (in seconds) after a slash vote reaches quorum before it can be executed (0 = immediate).
     pub slash_delay_seconds: u64,
+    /// Designated successor admin address that can claim admin rights without multi-sig approval
+    /// when current admins are unavailable.
+    pub successor_admin: Option<Address>,
 }
 
 // ── Data Types ────────────────────────────────────────────────────────────────
@@ -507,22 +571,8 @@ pub enum TimelockAction {
     SetConfig(Config),
 }
 
-/// Escrow state for a repayment pending oracle verification.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum EscrowStatus {
-    /// No escrow in flight (default).
-    None,
-    /// Repayment held pending oracle approval.
-    Pending,
-    /// Oracle approved — funds released to vouchers.
-    Released,
-    /// Oracle rejected — funds returned to borrower.
-    Rejected,
-}
-
-/// A slash execution that has been approved by governance but is waiting for
-/// its `executable_at` delay to elapse before it can be carried out.
+/// A pending slash awaiting execution after the mandatory delay period.
+/// Created when a slash vote reaches quorum; executed via `execute_pending_slash`.
 #[contracttype]
 #[derive(Clone)]
 pub struct PendingSlashRecord {
@@ -584,7 +634,22 @@ pub struct WithdrawalRequest {
     pub requested_at: u64,
 }
 
-// ── API Versioning (Issue #723) ───────────────────────────────────────────────
+/// A queued withdrawal request submitted during an active loan.
+/// Processed automatically when the loan is repaid or slashed.
+#[contracttype]
+#[derive(Clone)]
+pub struct QueuedWithdrawal {
+    /// The voucher requesting withdrawal.
+    pub voucher: Address,
+    /// Token the stake is denominated in.
+    pub token: Address,
+    /// Ledger timestamp when the request was submitted.
+    pub requested_at: u64,
+    /// Whether this is a partial withdrawal (up to 50% of stake with penalty).
+    pub partial: bool,
+    /// Priority fee paid by the voucher (in stroops), distributed to remaining vouchers.
+    pub priority_fee: i128,
+}
 
 /// Current API version of the contract.
 pub const API_VERSION: u32 = 1;
@@ -599,8 +664,29 @@ pub struct ApiVersion {
 
 // ── API Caching (Issue #724) ──────────────────────────────────────────────────
 
-/// Cache TTL in seconds for read-heavy queries (default 60 seconds).
-pub const CACHE_TTL_SECS: u64 = 60;
+/// Issue #687: Governance proposal to remove a compromised admin address.
+/// Passes when `approve_votes >= Config.removal_vote_threshold`.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminRemovalProposal {
+    pub id: u64,
+    /// Admin address to be removed if the proposal passes.
+    pub admin_to_remove: Address,
+    /// Address that created the proposal (must be a governance participant).
+    pub proposer: Address,
+    /// Number of approve votes cast so far.
+    pub approve_votes: u32,
+    /// Number of reject votes cast so far.
+    pub reject_votes: u32,
+    /// Addresses that have already voted (prevent double-voting).
+    pub voters: Vec<Address>,
+    /// Ledger timestamp when the proposal was created.
+    pub proposed_at: u64,
+    /// True once the proposal has been finalized (admin removed or rejected).
+    pub finalized: bool,
+}
+
+// ── Pagination ────────────────────────────────────────────────────────────────
 
 #[contracttype]
 pub enum CacheKey {

@@ -71,6 +71,7 @@ impl QuorumCreditContract {
                 voting_period_seconds: crate::types::DEFAULT_VOTING_PERIOD_SECONDS,
                 slash_cooldown_seconds: 0,
                 emergency_pause_enabled: false,
+                successor_admin: None,
             },
         );
 
@@ -1665,5 +1666,103 @@ impl QuorumCreditContract {
         };
 
         Some(crate::error_response::error_to_response(&env, error))
+    }
+
+    // ── Issue #687: Governance-based admin removal ────────────────────────────
+
+    /// Propose removing a compromised admin via governance vote.
+    ///
+    /// Any governance participant (active voucher or admin) may call this.
+    /// Requires `Config.removal_vote_threshold > 0`.
+    pub fn propose_admin_removal(
+        env: Env,
+        proposer: Address,
+        admin_to_remove: Address,
+    ) -> Result<u64, ContractError> {
+        governance::propose_admin_removal(env, proposer, admin_to_remove)
+    }
+
+    /// Vote on an admin removal proposal.
+    ///
+    /// Any governance participant may vote once per proposal.
+    pub fn vote_admin_removal(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        approve: bool,
+    ) -> Result<(), ContractError> {
+        governance::vote_admin_removal(env, voter, proposal_id, approve)
+    }
+
+    /// Finalize an admin removal proposal once the vote threshold is met.
+    ///
+    /// Removes the targeted admin from `Config.admins` on success.
+    pub fn finalize_admin_removal(env: Env, proposal_id: u64) -> Result<(), ContractError> {
+        governance::finalize_admin_removal(env, proposal_id)
+    }
+
+    /// Return an admin removal proposal by ID.
+    pub fn get_admin_removal_proposal(
+        env: Env,
+        proposal_id: u64,
+    ) -> Option<AdminRemovalProposal> {
+        governance::get_admin_removal_proposal(env, proposal_id)
+    }
+
+    /// Set the minimum number of governance votes needed to remove an admin.
+    ///
+    /// 0 disables governance removal (admins can only be removed via multi-sig).
+    pub fn set_removal_vote_threshold(
+        env: Env,
+        admin_signers: Vec<Address>,
+        threshold: u32,
+    ) {
+        admin::set_removal_vote_threshold(env, admin_signers, threshold)
+    }
+
+    // ── Issue #686: Admin compensation ───────────────────────────────────────
+
+    /// Set the admin compensation rate in basis points.
+    ///
+    /// Controls what fraction of the compensation pool each admin earns per claim.
+    /// 0 disables admin compensation.
+    pub fn set_admin_compensation_bps(
+        env: Env,
+        admin_signers: Vec<Address>,
+        compensation_bps: u32,
+    ) {
+        admin::set_admin_compensation_bps(env, admin_signers, compensation_bps)
+    }
+
+    /// Add funds to the admin compensation pool.
+    ///
+    /// The `funder` transfers `amount` tokens to the contract's compensation pool.
+    /// These funds are later claimed by admins via `claim_admin_compensation`.
+    pub fn fund_admin_compensation(
+        env: Env,
+        funder: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        admin::fund_admin_compensation(env, funder, amount)
+    }
+
+    /// Claim admin compensation.
+    ///
+    /// The calling admin receives their pro-rata share of
+    /// `pool * admin_compensation_bps / 10_000 / num_admins`.
+    /// Limited to once per 24 hours per admin.
+    /// Returns the amount claimed, in stroops.
+    pub fn claim_admin_compensation(env: Env, admin: Address) -> Result<i128, ContractError> {
+        admin::claim_admin_compensation(env, admin)
+    }
+
+    /// Return the current admin compensation rate in basis points.
+    pub fn get_admin_compensation_bps(env: Env) -> u32 {
+        admin::get_admin_compensation_bps(env)
+    }
+
+    /// Return the current balance of the admin compensation pool, in stroops.
+    pub fn get_admin_compensation_pool(env: Env) -> i128 {
+        admin::get_admin_compensation_pool(env)
     }
 }
