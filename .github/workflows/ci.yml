@@ -2,89 +2,202 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+  workflow_call: {}
 
 env:
   CARGO_TERM_COLOR: always
 
+# Cancel in-progress runs for the same branch/PR to save CI minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: Test
+  # ── Rust: format check ──────────────────────────────────────────────────────
+  fmt:
+    name: Rustfmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      
-      - name: Cache cargo registry
-        uses: actions/cache@v4
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Run tests
-        run: cargo test --verbose
+          components: rustfmt
+
+      - name: Check formatting (workspace root)
+        run: cargo fmt --all -- --check
+
+      - name: Check formatting (QuorumCredit)
+        run: cargo fmt --all -- --check
         working-directory: QuorumCredit
 
+  # ── Rust: clippy lint ───────────────────────────────────────────────────────
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      
-      - name: Cache cargo registry
+
+      - name: Cache Cargo
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-      
-      - name: Run clippy
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-clippy-
+
+      - name: Clippy (workspace root)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Clippy (QuorumCredit)
         run: cargo clippy --all-targets --all-features -- -D warnings
         working-directory: QuorumCredit
 
-  fmt:
-    name: Format
+  # ── Rust: cargo check (native + WASM) ──────────────────────────────────────
+  check:
+    name: Cargo Check (wasm32)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
-      
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-check-
+
+      - name: cargo check (native, workspace root)
+        run: cargo check --all-targets
+
+      - name: cargo check (WASM, workspace root)
+        run: cargo check --target wasm32-unknown-unknown
+
+      - name: cargo check (native, QuorumCredit)
+        run: cargo check --all-targets
         working-directory: QuorumCredit
+
+      - name: cargo check (WASM, QuorumCredit)
+        run: cargo check --target wasm32-unknown-unknown
+        working-directory: QuorumCredit
+
+  # ── Rust: unit tests ────────────────────────────────────────────────────────
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: Run tests (workspace root)
+        run: cargo test --verbose
+
+      - name: Run tests (QuorumCredit)
+        run: cargo test --verbose
+        working-directory: QuorumCredit
+
+      - name: Run tests (api)
+        run: cargo test --verbose
+        working-directory: api
+
+  # ── Rust: dependency security audit ────────────────────────────────────────
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: Audit dependencies (workspace root)
+        run: cargo audit
+
+      - name: Audit dependencies (QuorumCredit)
+        run: cargo audit
+        working-directory: QuorumCredit
+
+  # ── TypeScript SDK ──────────────────────────────────────────────────────────
+  sdk-typescript:
+    name: SDK / TypeScript
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: sdk/typescript/package.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+  # ── Python SDK ──────────────────────────────────────────────────────────────
+  sdk-python:
+    name: SDK / Python
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: sdk/python/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install package in editable mode
+        run: pip install -e .
+
+      - name: Lint with ruff
+        run: |
+          pip install ruff==0.4.4
+          ruff check quorum_credit/

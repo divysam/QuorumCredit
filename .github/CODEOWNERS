@@ -1,3 +1,26 @@
-# Require review from core maintainers for changes to the contract source
-src/lib.rs @QuorumCredit/core-maintainers
+# CODEOWNERS — reviewers are automatically requested for matching paths.
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
+# Contract source (root workspace)
+src/ @QuorumCredit/core-maintainers
+
+# Contract source (QuorumCredit crate)
+QuorumCredit/src/ @QuorumCredit/core-maintainers
+
+# API service
+api/ @QuorumCredit/core-maintainers
+
+# CI/CD pipeline — changes require maintainer review
+.github/ @QuorumCredit/core-maintainers
+
+# Deployment scripts
+scripts/ @QuorumCredit/core-maintainers
+
+# SDK changes
+sdk/ @QuorumCredit/core-maintainers
+
+# Security-sensitive files
+SECURITY.md @QuorumCredit/core-maintainers
+docs/threat-model.md @QuorumCredit/core-maintainers
+docs/security-audit-checklist.md @QuorumCredit/core-maintainers
+docs/security-best-practices.md @QuorumCredit/core-maintainers

@@ -3,37 +3,48 @@ name: Release WASM Artifact
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - "v*.*.*"
+
+permissions:
+  contents: write
 
 jobs:
-  build-and-release:
-    name: Build WASM and publish release
-    runs-on: ubuntu-latest
+  # ── Run full CI before releasing ────────────────────────────────────────────
+  ci:
+    name: Pre-release CI
+    uses: ./.github/workflows/ci.yml
 
+  # ── Build WASM and publish GitHub Release ───────────────────────────────────
+  build-and-release:
+    name: Build WASM and Publish Release
+    needs: ci
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Install git-cliff
-        run: cargo install --locked git-cliff-cli
-
-      - name: Generate changelog
-        run: git cliff -o CHANGELOG.md
-
-      - name: Cache Cargo registry
+      - name: Cache Cargo
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Install git-cliff
+        run: cargo install --locked git-cliff-cli
+
+      - name: Generate changelog
+        run: git cliff --current -o CHANGELOG.md
 
       - name: Build WASM (release)
         run: cargo build --release --target wasm32-unknown-unknown
@@ -52,20 +63,70 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: QuorumCredit ${{ github.ref_name }}
-          body: |
-            ## QuorumCredit ${{ github.ref_name }}
-
-            ### Assets
-            - `quorum_credit_${{ github.ref_name }}.wasm` — compiled CosmWasm contract
-            - `quorum_credit_${{ github.ref_name }}.wasm.sha256` — SHA256 checksum
-
-            ### Verify checksum
-            ```bash
-            sha256sum -c quorum_credit_${{ github.ref_name }}.wasm.sha256
-            ```
+          body_path: CHANGELOG.md
           files: |
             quorum_credit_${{ github.ref_name }}.wasm
             quorum_credit_${{ github.ref_name }}.wasm.sha256
             CHANGELOG.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Publish TypeScript SDK to npm ───────────────────────────────────────────
+  publish-sdk-typescript:
+    name: Publish TypeScript SDK
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # Only publish if NPM_TOKEN is configured; skip otherwise
+        if: ${{ secrets.NPM_TOKEN != '' }}
+
+  # ── Publish Python SDK to PyPI ───────────────────────────────────────────────
+  publish-sdk-python:
+    name: Publish Python SDK
+    needs: build-and-release
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build distribution
+        run: python -m build
+
+      - name: Publish to PyPI
+        run: twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        # Only publish if PYPI_TOKEN is configured; skip otherwise
+        if: ${{ secrets.PYPI_TOKEN != '' }}
