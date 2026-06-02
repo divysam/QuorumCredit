@@ -116,6 +116,10 @@ mod vouch_global_cooldown_test;
 mod stake_decay_test;
 #[cfg(test)]
 mod vouch_conditions_test;
+#[cfg(test)]
+mod loan_equity_conversion_test;
+#[cfg(test)]
+mod cross_default_test;
 
 pub use errors::ContractError;
 pub use types::*;
