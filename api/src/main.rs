@@ -47,7 +47,6 @@ pub struct AuthResponse {
 pub struct WebhookSubscribeRequest {
     pub url: String,
     pub events: Vec<String>,
-    pub secret: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -117,7 +116,7 @@ async fn subscribe_webhook(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     match state
         .webhook_manager
-        .subscribe(payload.url, payload.events, payload.secret)
+        .subscribe(payload.url, payload.events)
         .await
     {
         Ok(sub) => Ok(Json(serde_json::to_value(sub).unwrap())),
@@ -303,7 +302,5 @@ mod tests {
             webhook_manager: Arc::new(WebhookManager::new()),
             rate_limiter: rl,
         };
-
-        assert!(Arc::strong_count(&state.jwt_auth) >= 1);
     }
 }
