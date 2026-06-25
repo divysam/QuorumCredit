@@ -59,6 +59,12 @@ pub const TIMELOCK_EXPIRY: u64 = 72 * 60 * 60;
 /// immediately withdraws.
 pub const MIN_VOUCH_LOCK_PERIOD: u64 = 7 * 24 * 60 * 60;
 
+/// Duration of slash escrow period before funds are burned or returned, in seconds (7 days).
+pub const SLASH_APPEAL_PERIOD: u64 = 7 * 24 * 60 * 60;
+
+/// Quorum required to overturn a slash appeal, in basis points (6667 = 2/3).
+pub const APPEAL_OVERRIDE_QUORUM_BPS: u32 = 6_667;
+
 /// Fraction of slashed funds routed to the insurance pool (2000 = 20%).
 pub const SLASH_TO_INSURANCE_BPS: u32 = 2_000;
 /// Default insurance fee on loan disbursement (50 = 0.5%).
@@ -342,7 +348,8 @@ pub enum DataKey {
     YieldDistribution(u64),  // loan_id → Vec<YieldDistributionEntry>
     AdminAction(u64),        // action_id → AdminActionProposal
     AdminActionCounter,      // u64: monotonically increasing admin action ID
-    SlashAppeal(Address, Address), // (borrower, voucher) → SlashAppealRecord
+    SlashAppeal(Address, Address), // (borrower, voucher) → SlashAppealRecord (Issue #552)
+    SlashEscrowAppeal(Address), // borrower → SlashAppealRecord (Issue #841: escrow-based appeal)
     /// Slash-threshold governance proposal id → proposal record.
     SlashThresholdProposal(u64),
     SlashThresholdProposalCounter,
@@ -447,6 +454,48 @@ pub struct SlashVoteRecord {
     pub voters: Vec<Address>,
     /// `true` once the slash has been auto-executed after quorum was reached.
     pub executed: bool,
+}
+
+/// Slash escrow record holding slashed funds in 7-day escrow pending appeal.
+#[contracttype]
+#[derive(Clone)]
+pub struct SlashEscrow {
+    pub borrower: Address,
+    pub loan_id: u64,
+    /// Slashed amount held in escrow (50% of total stake).
+    pub escrow_amount: i128,
+    /// Timestamp when escrow period expires (created_at + 7 days).
+    pub release_timestamp: u64,
+    /// Status: Pending, Approved, or Rejected.
+    pub status: AppealStatus,
+}
+
+/// Status of a slash appeal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppealStatus {
+    /// Appeal in progress.
+    Pending,
+    /// Appeal approved; slash is overturned and funds returned to vouchers.
+    Approved,
+    /// Appeal rejected; funds are burned after escrow period.
+    Rejected,
+}
+
+/// Record of a slash appeal voted on by vouchers (Issue #841: escrow-based).
+#[contracttype]
+#[derive(Clone)]
+pub struct SlashEscrowAppealRecord {
+    pub borrower: Address,
+    pub loan_id: u64,
+    /// Total stake that voted to approve the appeal (overturn slash).
+    pub approve_stake: i128,
+    /// Total stake that voted to reject the appeal (keep slash).
+    pub reject_stake: i128,
+    /// Addresses that have already voted on this appeal.
+    pub voters: Vec<Address>,
+    /// Timestamp when appeal was created.
+    pub appeal_timestamp: u64,
 }
 
 #[contracttype]

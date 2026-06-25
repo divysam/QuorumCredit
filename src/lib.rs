@@ -1236,6 +1236,25 @@ impl QuorumCreditContract {
         governance::get_slash_threshold_proposal(env, proposal_id)
     }
 
+    // ── Slash Appeal & Escrow (Issue #841) ────────────────────────────────────
+
+    pub fn appeal_slash(env: Env, borrower: Address) -> Result<(), ContractError> {
+        governance::appeal_slash(env, borrower)
+    }
+
+    pub fn vote_appeal(
+        env: Env,
+        voucher: Address,
+        borrower: Address,
+        approve: bool,
+    ) -> Result<(), ContractError> {
+        governance::vote_appeal(env, voucher, borrower, approve)
+    }
+
+    pub fn finalize_appeal(env: Env, borrower: Address) -> Result<(), ContractError> {
+        governance::finalize_appeal(env, borrower)
+    }
+
     // ── Admin management ─────────────────────────────────────────────────────
 
     pub fn add_admin(env: Env, admin_signers: Vec<Address>, new_admin: Address) {

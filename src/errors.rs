@@ -144,4 +144,12 @@ SyndicationMinMembersNotMet = 124,
 InvalidSyndicationShare = 125,
 /// Syndication configuration is invalid.
 InvalidSyndicationConfig = 126,
+/// No slash escrow found for this borrower.
+AppealNotFound = 127,
+/// Voucher has already voted on this appeal.
+AppealAlreadyVoted = 128,
+/// Appeal quorum (2/3 voucher stake) not met to overturn slash.
+AppealQuorumNotMet = 129,
+/// Escrow period has expired; appeal can no longer be filed or voted on.
+EscrowExpired = 130,
 }
