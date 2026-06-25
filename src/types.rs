@@ -437,6 +437,8 @@ pub enum DataKey {
     SyndicationRepayment(u64, u64), // syndication_id, repayment_index
     /// Syndication repayment counter
     SyndicationRepaymentCounter(u64), // syndication_id → counter
+    /// Reputation NFT badge for excellent credit tier: borrower → ReputationNFTRecord
+    ReputationNFTBadge(Address),
 }
 
 // ── Governance ────────────────────────────────────────────────────────────────
@@ -717,6 +719,16 @@ pub struct CreditScore {
     pub voucher_count: u32,
     /// Average repayment time (in seconds before deadline, negative if late)
     pub avg_repayment_time: i64,
+}
+
+/// Reputation NFT badge record for borrowers reaching Excellent tier.
+#[contracttype]
+#[derive(Clone)]
+pub struct ReputationNFTRecord {
+    /// Address of the borrower who minted the badge
+    pub borrower: Address,
+    /// Ledger timestamp when the NFT badge was minted
+    pub minted_at: u64,
 }
 
 /// Credit score calculation factors.

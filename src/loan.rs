@@ -369,6 +369,9 @@ pub fn repay(env: Env, borrower: Address, payment: i128) -> Result<(), ContractE
             .persistent()
             .set(&DataKey::RepaymentCount(borrower.clone()), &(prev_count + 1));
 
+        // Try to mint excellent credit tier badge if eligible
+        let _ = crate::reputation::mint_excellent_badge(&env, &borrower);
+
         env.storage()
             .persistent()
             .remove(&DataKey::ActiveLoan(borrower.clone()));

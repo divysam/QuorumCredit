@@ -398,6 +398,9 @@ impl QuorumCreditContract {
             .persistent()
             .set(&DataKey::DefaultCount(borrower.clone()), &(count + 1));
 
+        // Burn excellent credit tier badge on default
+        reputation::burn_excellent_badge(&env, &borrower);
+
         if let Some(nft_addr) = env
             .storage()
             .instance()
@@ -1472,6 +1475,14 @@ impl QuorumCreditContract {
             None => return 0,
         };
         ReputationNftExternalClient::new(&env, &nft_addr).balance(&borrower)
+    }
+
+    pub fn has_excellent_badge(env: Env, borrower: Address) -> bool {
+        reputation::has_excellent_badge(&env, &borrower)
+    }
+
+    pub fn get_excellent_badge(env: Env, borrower: Address) -> Option<crate::types::ReputationNFTRecord> {
+        reputation::get_excellent_badge(&env, &borrower)
     }
 
     pub fn total_vouched(env: Env, borrower: Address) -> Result<i128, ContractError> {
