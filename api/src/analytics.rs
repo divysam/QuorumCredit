@@ -616,6 +616,107 @@ impl PortfolioHealthMetrics {
     }
 }
 
+/// Early loan buyout tracking (Issue #889)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoanBuyoutRecord {
+    pub loan_id: u64,
+    pub borrower: String,
+    pub buyer: String,
+    pub buyout_amount: i128,
+    pub remaining_principal: i128,
+    pub remaining_yield: i128,
+    pub buyout_timestamp: i64,
+    pub days_to_maturity: i64,
+    pub interest_saved: i128,
+    pub buyout_status: BuyoutStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum BuyoutStatus {
+    Proposed,
+    Accepted,
+    Completed,
+    Cancelled,
+}
+
+/// Buyout metrics aggregated for portfolio analysis
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BuyoutMetrics {
+    pub total_buyouts_completed: u32,
+    pub total_buyout_value: i128,
+    pub total_interest_saved: i128,
+    pub average_days_to_maturity_at_buyout: f64,
+    pub average_buyout_amount: i128,
+    pub unique_buyers: u32,
+    pub unique_borrowers: u32,
+    pub buyout_adoption_rate: f64, // completed buyouts / total loans
+}
+
+impl BuyoutMetrics {
+    pub fn new() -> Self {
+        Self {
+            total_buyouts_completed: 0,
+            total_buyout_value: 0,
+            total_interest_saved: 0,
+            average_days_to_maturity_at_buyout: 0.0,
+            average_buyout_amount: 0,
+            unique_buyers: 0,
+            unique_borrowers: 0,
+            buyout_adoption_rate: 0.0,
+        }
+    }
+
+    /// Calculate buyout metrics from buyout records
+    pub fn from_buyout_records(
+        records: &[LoanBuyoutRecord],
+        total_loans: u32,
+    ) -> Self {
+        let mut metrics = Self::new();
+
+        if records.is_empty() {
+            return metrics;
+        }
+
+        let completed: Vec<&LoanBuyoutRecord> = records
+            .iter()
+            .filter(|r| r.buyout_status == BuyoutStatus::Completed)
+            .collect();
+
+        if completed.is_empty() {
+            return metrics;
+        }
+
+        metrics.total_buyouts_completed = completed.len() as u32;
+
+        let mut buyers = std::collections::HashSet::new();
+        let mut borrowers = std::collections::HashSet::new();
+        let mut total_days = 0.0;
+
+        for record in &completed {
+            buyers.insert(record.buyer.clone());
+            borrowers.insert(record.borrower.clone());
+            metrics.total_buyout_value = metrics.total_buyout_value.saturating_add(record.buyout_amount);
+            metrics.total_interest_saved = metrics.total_interest_saved.saturating_add(record.interest_saved);
+            total_days += record.days_to_maturity as f64;
+        }
+
+        metrics.unique_buyers = buyers.len() as u32;
+        metrics.unique_borrowers = borrowers.len() as u32;
+
+        if !completed.is_empty() {
+            metrics.average_buyout_amount = metrics.total_buyout_value / completed.len() as i128;
+            metrics.average_days_to_maturity_at_buyout = total_days / completed.len() as f64;
+        }
+
+        if total_loans > 0 {
+            metrics.buyout_adoption_rate = metrics.total_buyouts_completed as f64 / total_loans as f64;
+        }
+
+        metrics
+    }
+}
+
 /// Compute `ProtocolMetrics` from raw loan + vouch snapshots, applying optional filters.
 pub fn aggregate_metrics(
     loans: &[LoanSnapshot],
@@ -1430,5 +1531,131 @@ mod tests {
         assert!(health.health_score > 0.0);
         assert!(health.health_score <= 100.0);
         assert_eq!(health.portfolio_success_rate, 1.0);
+    }
+
+    // Test 29: Buyout metrics calculation from records
+    #[test]
+    fn test_buyout_metrics_from_records() {
+        let records = vec![
+            LoanBuyoutRecord {
+                loan_id: 1,
+                borrower: "borrower1".to_string(),
+                buyer: "buyer1".to_string(),
+                buyout_amount: 5_000_000_000,
+                remaining_principal: 4_500_000_000,
+                remaining_yield: 500_000_000,
+                buyout_timestamp: 1000,
+                days_to_maturity: 30,
+                interest_saved: 100_000_000,
+                buyout_status: BuyoutStatus::Completed,
+            },
+            LoanBuyoutRecord {
+                loan_id: 2,
+                borrower: "borrower2".to_string(),
+                buyer: "buyer2".to_string(),
+                buyout_amount: 3_000_000_000,
+                remaining_principal: 2_700_000_000,
+                remaining_yield: 300_000_000,
+                buyout_timestamp: 2000,
+                days_to_maturity: 20,
+                interest_saved: 60_000_000,
+                buyout_status: BuyoutStatus::Completed,
+            },
+        ];
+
+        let metrics = BuyoutMetrics::from_buyout_records(&records, 100);
+
+        assert_eq!(metrics.total_buyouts_completed, 2);
+        assert_eq!(metrics.total_buyout_value, 8_000_000_000);
+        assert_eq!(metrics.total_interest_saved, 160_000_000);
+        assert_eq!(metrics.unique_buyers, 2);
+        assert_eq!(metrics.unique_borrowers, 2);
+        assert_eq!(metrics.average_buyout_amount, 4_000_000_000);
+        assert_eq!(metrics.average_days_to_maturity_at_buyout, 25.0);
+        assert!(metrics.buyout_adoption_rate > 0.01 && metrics.buyout_adoption_rate < 0.03);
+    }
+
+    // Test 30: Buyout metrics with proposed/cancelled status filtered
+    #[test]
+    fn test_buyout_metrics_ignore_non_completed() {
+        let records = vec![
+            LoanBuyoutRecord {
+                loan_id: 1,
+                borrower: "b1".to_string(),
+                buyer: "buyer1".to_string(),
+                buyout_amount: 5_000_000_000,
+                remaining_principal: 4_500_000_000,
+                remaining_yield: 500_000_000,
+                buyout_timestamp: 1000,
+                days_to_maturity: 30,
+                interest_saved: 100_000_000,
+                buyout_status: BuyoutStatus::Completed,
+            },
+            LoanBuyoutRecord {
+                loan_id: 2,
+                borrower: "b2".to_string(),
+                buyer: "buyer2".to_string(),
+                buyout_amount: 3_000_000_000,
+                remaining_principal: 2_700_000_000,
+                remaining_yield: 300_000_000,
+                buyout_timestamp: 2000,
+                days_to_maturity: 20,
+                interest_saved: 60_000_000,
+                buyout_status: BuyoutStatus::Proposed,
+            },
+            LoanBuyoutRecord {
+                loan_id: 3,
+                borrower: "b3".to_string(),
+                buyer: "buyer3".to_string(),
+                buyout_amount: 2_000_000_000,
+                remaining_principal: 1_800_000_000,
+                remaining_yield: 200_000_000,
+                buyout_timestamp: 3000,
+                days_to_maturity: 15,
+                interest_saved: 40_000_000,
+                buyout_status: BuyoutStatus::Cancelled,
+            },
+        ];
+
+        let metrics = BuyoutMetrics::from_buyout_records(&records, 100);
+
+        // Only loan 1 is completed
+        assert_eq!(metrics.total_buyouts_completed, 1);
+        assert_eq!(metrics.total_buyout_value, 5_000_000_000);
+        assert_eq!(metrics.total_interest_saved, 100_000_000);
+    }
+
+    // Test 31: Buyout metrics with empty records
+    #[test]
+    fn test_buyout_metrics_empty() {
+        let records: Vec<LoanBuyoutRecord> = vec![];
+        let metrics = BuyoutMetrics::from_buyout_records(&records, 100);
+
+        assert_eq!(metrics.total_buyouts_completed, 0);
+        assert_eq!(metrics.total_buyout_value, 0);
+        assert_eq!(metrics.total_interest_saved, 0);
+        assert_eq!(metrics.average_buyout_amount, 0);
+        assert_eq!(metrics.buyout_adoption_rate, 0.0);
+    }
+
+    // Test 32: Buyout record tracks interest savings correctly
+    #[test]
+    fn test_buyout_record_interest_savings() {
+        let record = LoanBuyoutRecord {
+            loan_id: 1,
+            borrower: "borrower1".to_string(),
+            buyer: "buyer1".to_string(),
+            buyout_amount: 5_000_000_000,
+            remaining_principal: 4_500_000_000,
+            remaining_yield: 500_000_000,
+            buyout_timestamp: 1000,
+            days_to_maturity: 60,
+            interest_saved: 250_000_000,
+            buyout_status: BuyoutStatus::Completed,
+        };
+
+        // Interest saved should be positive when buyout occurs before maturity
+        assert!(record.interest_saved > 0);
+        assert_eq!(record.days_to_maturity, 60);
     }
 }
