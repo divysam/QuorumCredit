@@ -81,6 +81,15 @@ mod withdrawal_timelock_test;
 #[cfg(test)]
 mod cross_chain_proposal_sync_test;
 
+#[cfg(test)]
+mod proposal_metadata_test;
+#[cfg(test)]
+mod emergency_pause_auto_unpause_test;
+#[cfg(test)]
+mod governance_snapshot_test;
+#[cfg(test)]
+mod vote_escrow_lock_test;
+
 use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
     require_allowed_token, require_not_paused,
