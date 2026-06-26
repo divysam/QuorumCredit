@@ -118,6 +118,9 @@ pub const DEFERMENT_PERIOD_SECS: u64 = 30 * 24 * 60 * 60;
 /// Penalty applied to partial mid-loan withdrawals, in basis points (1000 = 10%).
 pub const PARTIAL_WITHDRAWAL_PENALTY_BPS: i128 = 1_000;
 
+/// Yield stream period in seconds (7 days).
+pub const YIELD_STREAM_PERIOD_SECS: u64 = 7 * 24 * 60 * 60;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RateLimitConfig {
