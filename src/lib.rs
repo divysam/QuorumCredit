@@ -19,6 +19,10 @@ pub mod cache;
 pub mod error_response;
 pub mod versioning;
 pub mod cross_chain;
+/// Issue #867: Cross-Collateral Vouch Pools
+pub mod collateral_pool;
+/// Issue #868: Gradual Unstaking
+pub mod gradual_unstake;
 
 pub use errors::ContractError;
 pub use types::*;
@@ -60,13 +64,22 @@ mod integration_stress_test;
 #[cfg(test)]
 mod integration_regression_test;
 #[cfg(test)]
-mod overflow_protection_test;
+mod governance_history_test;
 #[cfg(test)]
-mod token_approval_frontrunning_test;
+mod slash_vote_cancel_test;
 #[cfg(test)]
-mod access_control_verification_test;
+mod dynamic_quorum_adjustment_test;
 #[cfg(test)]
-mod key_rotation_support_test;
+mod conditional_vote_delegation_test;
+
+#[cfg(test)]
+mod risk_assessment_voting_test;
+#[cfg(test)]
+mod fee_structure_voting_test;
+#[cfg(test)]
+mod withdrawal_timelock_test;
+#[cfg(test)]
+mod cross_chain_proposal_sync_test;
 
 use crate::helpers::{
     config, get_active_loan_record, has_active_loan, loan_status as helper_loan_status,
