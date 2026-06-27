@@ -555,6 +555,70 @@ mod coverage_tests {
     }
 
     #[test]
+    fn test_archive_completed_loan() {
+        let s = setup();
+        let voucher = Address::generate(&s.env);
+        let borrower = Address::generate(&s.env);
+        do_vouch(&s, &voucher, &borrower, 1_000_000);
+        do_loan(&s, &borrower, 100_000);
+        
+        // Repay the loan
+        StellarAssetClient::new(&s.env, &s.token).mint(&borrower, &102_000);
+        s.client.repay(&borrower, &102_000);
+        
+        // Verify loan is repaid
+        assert_eq!(s.client.loan_status(&borrower), LoanStatus::Repaid);
+        
+        // Archive count should reflect the archived loan
+        // Note: Archive is called internally during repay
+        assert!(s.client.get_archive_count() > 0);
+    }
+
+    #[test]
+    fn test_archive_retrieved_correctly() {
+        let s = setup();
+        let voucher = Address::generate(&s.env);
+        let borrower = Address::generate(&s.env);
+        do_vouch(&s, &voucher, &borrower, 1_000_000);
+        do_loan(&s, &borrower, 100_000);
+        
+        // Repay loan
+        StellarAssetClient::new(&s.env, &s.token).mint(&borrower, &102_000);
+        s.client.repay(&borrower, &102_000);
+        
+        // Get archive ID
+        let archive_count = s.client.get_archive_count();
+        assert_eq!(archive_count, 1); // First archived loan
+    }
+
+    #[test]
+    fn test_archive_multiple_loans() {
+        let s = setup();
+        let voucher = Address::generate(&s.env);
+        let borrower1 = Address::generate(&s.env);
+        let borrower2 = Address::generate(&s.env);
+        
+        // First loan
+        StellarAssetClient::new(&s.env, &s.token).mint(&voucher, &1_000_000);
+        s.client.vouch(&voucher, &borrower1, &500_000, &s.token);
+        s.env.ledger().with_mut(|l| l.timestamp += 61);
+        s.client.request_loan(&borrower1, &100_000, &400_000, &String::from_str(&s.env, "test1"), &s.token);
+        StellarAssetClient::new(&s.env, &s.token).mint(&borrower1, &102_000);
+        s.client.repay(&borrower1, &102_000);
+        
+        // Second loan
+        StellarAssetClient::new(&s.env, &s.token).mint(&voucher, &500_000);
+        s.client.vouch(&voucher, &borrower2, &500_000, &s.token);
+        s.env.ledger().with_mut(|l| l.timestamp += 61);
+        s.client.request_loan(&borrower2, &100_000, &400_000, &String::from_str(&s.env, "test2"), &s.token);
+        StellarAssetClient::new(&s.env, &s.token).mint(&borrower2, &102_000);
+        s.client.repay(&borrower2, &102_000);
+        
+        // Both loans should be archived
+        assert_eq!(s.client.get_archive_count(), 2);
+    }
+
+    #[test]
     fn test_repayment_count() {
         let s = setup();
         let voucher = Address::generate(&s.env);
