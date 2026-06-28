@@ -480,18 +480,17 @@ pub enum DataKey {
     // ── Issue #885: Loan Status Privacy ──────────────────────────────────────
     /// borrower → LoanPrivacyLevel
     LoanPrivacy(Address),
-    // ── Issue #934: Yield Calculation Caching ─────────────────────────────────
-    /// (borrower, voucher) → CachedYieldRecord: cached per-vouch yield bps
-    YieldCache(Address, Address),
-    // ── Issue #935: Batch Token Transfers ────────────────────────────────────
-    /// Vec<BatchTransfer>: queued token transfers for batch processing
-    PendingTransfers,
-    // ── Issue #936: Merkle Tree Verification ─────────────────────────────────
-    /// borrower → VouchMerkleRoot: committed Merkle root over vouch list
-    VouchMerkleRoot(Address),
-    // ── Issue #937: Lazy Slash Execution ─────────────────────────────────────
-    /// Vec<LazySlashEntry>: slash operations queued for batch execution
-    LazySlashQueue,
+    // ── Issue #887: Loan Subordination and Cascading Debt Hierarchy ──────────
+    /// (senior_loan_id, subordinate_loan_id) → SubordinationRecord
+    SubordinationRelation(u64, u64),
+    /// senior_loan_id → Vec<u64> (IDs of all subordinate loans ordered by priority)
+    SubordinateLoansList(u64),
+    /// subordinate_loan_id → u64 (ID of direct senior loan, if any)
+    SeniorLoanOf(u64),
+    /// senior_loan_id → CascadingDefault (tracks cascade triggered by default)
+    CascadingDefaultRecord(u64),
+    /// Waterfall distribution configuration for a borrower
+    WaterfallConfig(Address),
 }
 
 /// Issue #867: Shared collateral pool backed by multiple vouchers.
@@ -611,6 +610,55 @@ pub struct ConfigUpdateProposal {
 }
 
 // ── Admin Governance Queue with Multi-Signature Confirmation ─────────────────────
+
+/// Issue #893: Admin operation types for multi-tier approval thresholds.
+/// Different operations can require different numbers of admin approvals based on criticality.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdminOperationType {
+    /// Low-risk operations (e.g., setting parameters like min_stake)
+    Standard,
+    /// Medium-risk operations (e.g., adding/removing tokens, admin changes)
+    HighRisk,
+    /// Critical operations (e.g., contract upgrade, pause, emergency actions)
+    Critical,
+}
+
+/// Issue #893: Multi-tier admin approval thresholds for different operation types.
+/// Allows different admin operations to require different numbers of approvals.
+#[contracttype]
+#[derive(Clone)]
+pub struct MultiTierAdminThresholds {
+    /// Approvals required for standard operations (default: same as admin_threshold)
+    pub standard_threshold: u32,
+    /// Approvals required for high-risk operations (default: 2x standard)
+    pub high_risk_threshold: u32,
+    /// Approvals required for critical operations (default: all admins)
+    pub critical_threshold: u32,
+}
+
+impl MultiTierAdminThresholds {
+    /// Create default thresholds based on total admin count.
+    /// Standard = 1, HighRisk = (total/2)+1, Critical = total
+    pub fn default_for_admin_count(admin_count: u32) -> Self {
+        let high_risk = if admin_count > 1 { (admin_count / 2) + 1 } else { 1 };
+        let critical = admin_count;
+        MultiTierAdminThresholds {
+            standard_threshold: 1,
+            high_risk_threshold: high_risk,
+            critical_threshold: critical,
+        }
+    }
+
+    /// Get the threshold for a specific operation type
+    pub fn get_threshold(&self, operation_type: AdminOperationType) -> u32 {
+        match operation_type {
+            AdminOperationType::Standard => self.standard_threshold,
+            AdminOperationType::HighRisk => self.high_risk_threshold,
+            AdminOperationType::Critical => self.critical_threshold,
+        }
+    }
+}
 
 /// Types of governance actions that can be proposed in the admin governance queue.
 #[contracttype]
@@ -1085,6 +1133,9 @@ pub struct Config {
     /// when current admins are unavailable.
     pub successor_admin: Option<Address>,
     pub rate_limit_config: RateLimitConfig,
+    /// Issue #893: Multi-tier admin approval thresholds for different operation types.
+    /// If not set, falls back to single admin_threshold for all operations.
+    pub multi_tier_thresholds: Option<MultiTierAdminThresholds>,
 }
 
 // ── Data Types ────────────────────────────────────────────────────────────────
@@ -1614,85 +1665,77 @@ pub enum LoanPrivacyLevel {
     Private,
 }
 
-// ── Issue #934: Yield Calculation Caching ─────────────────────────────────────
+// ── Issue #887: Loan Subordination and Cascading Debt Hierarchy ──────────────
 
-/// Cache TTL for general cached records (5 minutes).
-pub const CACHE_TTL_SECS: u64 = 5 * 60;
-
-/// Cache TTL for per-vouch yield rate calculations (1 hour).
-/// Yield rates change slowly (based on vouch age, reputation counts), so a longer
-/// TTL is appropriate here to avoid recomputing on every incremental stake update.
-pub const YIELD_CACHE_TTL_SECS: u64 = 60 * 60;
-
-/// Cached per-vouch yield rate for a (borrower, voucher) pair.
+/// Issue #887: Subordination level in the debt hierarchy.
+/// Determines priority order for repayment and default cascading.
 #[contracttype]
-#[derive(Clone)]
-pub struct CachedYieldRecord {
-    /// Cached yield rate in basis points.
-    pub yield_bps: i128,
-    /// Ledger timestamp when this cache entry was written.
-    pub cached_at: u64,
-    /// The base yield_bps from Config at cache time (used to detect config changes).
-    pub base_yield_bps: i128,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum SubordinationLevel {
+    /// Senior (Priority 0): Highest priority. Must be fully repaid first.
+    /// Default of senior loan blocks all subordinate loans.
+    Senior = 0,
+    /// Mezzanine (Priority 1): Intermediate level.
+    /// Can have both senior and subordinate loans.
+    Mezzanine = 1,
+    /// Subordinate (Priority 2+): Lowest priority.
+    /// Repaid after seniors. Affected by senior defaults (cascading).
+    Subordinate = 2,
 }
 
-// ── Issue #936: Merkle Tree Verification ─────────────────────────────────────
-
-/// Stored Merkle root over the canonical vouch list for a borrower.
-/// Enables off-chain provers to submit compact inclusion proofs instead of the
-/// full vouch list, and on-chain callers to verify single-root integrity.
+/// Issue #887: Represents a subordination relationship between two loans.
+/// Links a subordinate (junior) loan to its senior (creditor priority) loan.
 #[contracttype]
 #[derive(Clone)]
-pub struct VouchMerkleRoot {
-    /// SHA-256 root hash of the ordered vouch set (leaf = hash(voucher || stake || token)).
-    pub root: soroban_sdk::BytesN<32>,
-    /// Number of vouches committed in this root.
-    pub vouch_count: u32,
-    /// Ledger timestamp when the root was last computed and stored.
-    pub computed_at: u64,
+pub struct SubordinationRecord {
+    /// ID of the senior (higher priority) loan
+    pub senior_loan_id: u64,
+    /// ID of the subordinate (lower priority) loan
+    pub subordinate_loan_id: u64,
+    /// The subordination level relative to the senior loan
+    pub subordination_level: SubordinationLevel,
+    /// Ledger timestamp when this subordination relationship was created
+    pub created_at: u64,
+    /// Whether this subordination is currently active (true) or waived (false)
+    pub is_active: bool,
+    /// Priority order index if senior loan has multiple subordinates (0 = highest priority)
+    pub priority_index: u32,
 }
 
-// ── Issue #937: Lazy Slash Execution ─────────────────────────────────────────
-
-/// A slash that has been queued but not yet executed.
-/// Queued slashes are executed in batches via `process_slash_queue`.
+/// Issue #887: Represents cascading default information.
+/// Tracks which loans are affected when a senior loan defaults.
 #[contracttype]
 #[derive(Clone)]
-pub struct QueuedSlash {
-    /// Borrower whose stake is to be slashed.
-    pub borrower: Address,
-    /// Ledger timestamp when the slash was queued.
-    pub queued_at: u64,
-    /// Earliest timestamp at which this slash may be executed (queued_at + slash_delay).
-    pub executable_at: u64,
-    /// Whether this entry has already been executed.
-    pub executed: bool,
+pub struct CascadingDefault {
+    /// ID of the senior loan that defaulted and triggered the cascade
+    pub triggering_senior_loan_id: u64,
+    /// IDs of all subordinate loans affected by this default
+    pub affected_subordinate_ids: Vec<u64>,
+    /// Ledger timestamp when the cascade was triggered
+    pub triggered_at: u64,
+    /// Whether the cascade has been fully resolved (all affected loans handled)
+    pub is_resolved: bool,
 }
 
-// ── Issue #935: Batch Token Transfers ────────────────────────────────────────
-
-/// A queued token transfer to be executed in batch.
+/// Issue #887: Waterfall repayment distribution result.
+/// Specifies how a repayment should be split between senior and subordinate loans.
 #[contracttype]
 #[derive(Clone)]
-pub struct BatchTransfer {
-    /// Recipient address.
-    pub to: Address,
-    /// Amount in stroops.
-    pub amount: i128,
-    /// Token contract address.
-    pub token: Address,
+pub struct WaterfallDistribution {
+    /// Amount to apply to the senior loan in stroops
+    pub senior_amount: i128,
+    /// Amount to apply to subordinate loans in stroops
+    pub subordinate_amount: i128,
+    /// Total amount distributed across all tiers
+    pub total_distributed: i128,
 }
 
-// ── Issue #937: Lazy Slash Execution ─────────────────────────────────────────
-
-/// A slash entry queued for deferred batch execution.
-#[contracttype]
-#[derive(Clone)]
-pub struct LazySlashEntry {
-    /// Borrower to be slashed.
-    pub borrower: Address,
-    /// Amount to slash (typically 50% of total vouched stake).
-    pub slash_amount: i128,
-    /// Ledger timestamp when the slash was queued.
-    pub queued_at: u64,
-}
+/// Issue #887: DataKey for subordination relationships
+/// Added to DataKey enum for storage:
+/// `SubordinationRelation(u64, u64)` => (senior_loan_id, subordinate_loan_id) -> SubordinationRecord
+/// `SubordinateLoansList(u64)` => senior_loan_id -> Vec<u64> (IDs of all subordinate loans)
+/// `SeniorLoanOf(u64)` => subordinate_loan_id -> u64 (ID of direct senior loan)
+/// `CascadingDefaultRecord(u64)` => senior_loan_id -> CascadingDefault
+pub const MAX_SUBORDINATION_DEPTH: u32 = 10; // Prevent deeply nested hierarchies
+pub const MAX_SUBORDINATES_PER_LOAN: u32 = 50; // Prevent excessive branching
