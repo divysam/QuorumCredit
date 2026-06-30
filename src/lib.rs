@@ -37,6 +37,8 @@ pub mod collateral_pool;
 pub mod gradual_unstake;
 /// Issue #887: Loan Subordination and Cascading Debt Hierarchy
 pub mod subordination;
+/// Issue #974: Cross-Chain Auction for Defaulted Loans
+pub mod auction;
 
 pub use errors::ContractError;
 pub use types::*;
